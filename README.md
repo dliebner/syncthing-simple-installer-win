@@ -1,6 +1,6 @@
 # Syncthing Simple Installer for Windows
 
-A simple PowerShell script to install and configure [Syncthing](https://syncthing.net/) as a background daemon on Windows. 
+A simple PowerShell script to install and configure [Syncthing](https://syncthing.net/) as a Scheduled Task on Windows.
 
 I created this because I couldn't find another small, easily auditable script that gets Syncthing running reliably as a service.
 
