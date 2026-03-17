@@ -35,6 +35,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+try {
+
 # ─────────────────────────────────────────────
 # CONFIGURATION
 # ─────────────────────────────────────────────
@@ -448,4 +450,15 @@ Write-Host "  - Delete $InstallDir"
 Write-Host "  - (Optional) Delete config and db at $env:LOCALAPPDATA\Syncthing"
 Write-Host ""
 
-Read-Host "Press Enter to exit...
+} catch {
+
+Write-Host ""
+Write-Host "❌ ERROR ENCOUNTERED:" -ForegroundColor Red
+Write-Host $_.Exception.Message -ForegroundColor Red
+Write-Host ""
+
+} finally {
+
+Read-Host "Press Enter to exit..."
+
+}
