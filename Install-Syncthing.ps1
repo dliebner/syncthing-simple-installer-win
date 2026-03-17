@@ -110,7 +110,7 @@ if ((Get-Item $zipPath).Length -lt 1MB) {
 
 # Download checksum file
 $checksumsAsset = $release.assets | Where-Object {
-    $_.name -match "^sha256.*\.txt$"
+    $_.name -match "^sha256.*\.txt(\.asc)?$"
 } | Select-Object -First 1
 
 if (-not $checksumsAsset) {
@@ -356,6 +356,73 @@ if ($isAdmin) {
 }
 
 # ─────────────────────────────────────────────
+# STEP 7: CREATE UNINSTALLER FILES
+# ─────────────────────────────────────────────
+
+Write-Step "Generating uninstaller files..."
+
+# Pre-encode the firewall removal command to avoid quote-escaping bugs in the uninstaller
+$safeRuleName = $FirewallRuleName -replace "'", "''"
+$fwRemoveCommand = "Remove-NetFirewallRule -DisplayName '$safeRuleName' -ErrorAction SilentlyContinue"
+$fwRemoveEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fwRemoveCommand))
+
+# 1. Create Uninstall-Syncthing.ps1
+$UninstallScriptPath = Join-Path $InstallDir "Uninstall-Syncthing.ps1"
+
+# Note: We use variable expansion here so the specific Task/Rule names 
+# generated during install are hardcoded into the uninstaller.
+$UninstallScript = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+
+Write-Host "Stopping Syncthing..." -ForegroundColor Cyan
+Get-Process "syncthing" | Stop-Process -Force
+
+Write-Host "Removing Scheduled Task ('$TaskNameStart')..." -ForegroundColor Cyan
+Unregister-ScheduledTask -TaskName "$TaskNameStart" -Confirm:`$false
+
+Write-Host "Removing Firewall Rule ('$FirewallRuleName')..." -ForegroundColor Cyan
+Write-Host "(Prompting for Admin privileges...)" -ForegroundColor Yellow
+Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $fwRemoveEncoded" -Wait
+
+Write-Host ""
+Write-Host "─────────────────────────────────────────────" -ForegroundColor Green
+Write-Host "  Syncthing services successfully removed!"
+Write-Host "─────────────────────────────────────────────" -ForegroundColor Green
+Write-Host ""
+Write-Host "You can now safely delete this installation folder: $InstallDir"
+Write-Host "If you want to clear your Syncthing config/database, delete: $env:LOCALAPPDATA\Syncthing"
+Write-Host ""
+Read-Host "Press Enter to exit..."
+"@
+
+Set-Content -Path $UninstallScriptPath -Value $UninstallScript -Encoding UTF8
+Write-Success "Created Uninstall-Syncthing.ps1"
+
+# 2. Create uninstall.txt
+$UninstallTxtPath = Join-Path $InstallDir "uninstall.txt"
+
+$UninstallText = @"
+To completely remove this Syncthing installation, perform the following steps:
+
+RECOMMENDED METHOD:
+1. Run Uninstall-Syncthing.ps1 in this folder
+2. Delete this folder ($InstallDir)
+
+MANUAL METHOD:
+1. Stop Syncthing if it is running (via Task Manager or Web UI).
+2. Open Task Scheduler and delete the task: '$TaskNameStart'
+3. Open Windows Defender Firewall and delete the inbound rule: '$FirewallRuleName'
+4. Delete this program folder: $InstallDir
+
+OPTIONAL (To clear all your synced folder configurations and database):
+Delete: $env:LOCALAPPDATA\Syncthing
+"@
+
+Set-Content -Path $UninstallTxtPath -Value $UninstallText -Encoding UTF8
+Write-Success "Created uninstall.txt"
+
+
+# ─────────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────────
 
@@ -376,8 +443,7 @@ Write-Host "  Next steps:"
 Write-Host "  1. Open http://localhost:$GuiPort to configure Syncthing"
 Write-Host ""
 Write-Host "  To uninstall:"
+Write-Host "  - Run $UninstallScriptPath"
 Write-Host "  - Delete $InstallDir"
-Write-Host "  - Remove scheduled task '$TaskNameStart'"
-Write-Host "  - Remove firewall rule '$FirewallRuleName'"
-Write-Host "  - Optional: Delete config and db at $env:LOCALAPPDATA\Syncthing"
+Write-Host "  - (Optional) Delete config and db at $env:LOCALAPPDATA\Syncthing"
 Write-Host ""
