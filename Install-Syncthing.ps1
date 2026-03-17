@@ -83,7 +83,10 @@ function Wait-SyncthingReady {
     Polls the Syncthing API until it responds or times out.
     Returns $true if ready, $false if timed out.
     #>
-    param([int]$TimeoutSeconds = 30)
+    param(
+        [System.Diagnostics.Process]$Process,
+        [int]$TimeoutSeconds = 30
+    )
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     Write-Host "    Waiting for Syncthing to start..." -NoNewline
     while ((Get-Date) -lt $deadline) {
@@ -178,6 +181,7 @@ Write-Step "Running Syncthing briefly to generate configuration..."
 if (-not (Test-Path $ConfigPath)) {
     $proc = Start-Process -FilePath $SyncthingExe `
         -ArgumentList "--no-browser", "--no-console", "--gui-address=127.0.0.1:$GuiPort" `
+        -WindowStyle Hidden `
         -PassThru
     $ready = Wait-SyncthingReady -Process $proc -TimeoutSeconds 45
 
@@ -242,9 +246,12 @@ if (Get-ScheduledTask -TaskName $TaskNameStart -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskNameStart -Confirm:$false
 }
 
+# Escape single quotes in path if present
+$safeExeTask = $SyncthingExe -replace "'", "''"
+
 $startAction = New-ScheduledTaskAction `
-    -Execute "`"$SyncthingExe`"" `
-    -Argument "--no-browser --no-console"
+    -Execute "powershell.exe" `
+    -Argument "-WindowStyle Hidden -NoProfile -Command `"Start-Process -FilePath '$safeExeTask' -ArgumentList '--no-browser', '--no-console' -WindowStyle Hidden`""
 
 # Trigger: at logon of current user, with startup delay
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -300,7 +307,8 @@ if ($isAdmin) {
 } else {
     Write-Warn "Prompting for Admin privileges to add the Firewall Rule..."
     $safeExe = $SyncthingExe -replace "'", "''"
-    $fwScript = "Remove-NetFirewallRule -DisplayName '$FirewallRuleName' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName '$FirewallRuleName' -Direction Inbound -Program '$safeExe' -Action Allow -Profile @('Private','Domain')"
+    $safeRuleName = $FirewallRuleName -replace "'", "''"
+    $fwScript = "Remove-NetFirewallRule -DisplayName '$safeRuleName' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName '$safeRuleName' -Direction Inbound -Program '$safeExe' -Action Allow -Profile @('Private','Domain')"
     $encoded  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fwScript))
     try {
         Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encoded" -Wait
