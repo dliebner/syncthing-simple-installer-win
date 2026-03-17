@@ -76,6 +76,10 @@ $releaseApi = "https://api.github.com/repos/syncthing/syncthing/releases/latest"
 $release    = Invoke-RestMethod -Uri $releaseApi -UseBasicParsing
 $version    = $release.tag_name
 
+if (-not $release -or -not $release.assets) {
+    throw "Failed to fetch valid release data from GitHub API"
+}
+
 # Determine architecture
 $isArm = ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -match 'ARM64')
 $arch = if ($isArm) { "arm64" } elseif ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
@@ -91,13 +95,66 @@ Write-Success "Found Syncthing $version ($assetName)"
 # Download to temp
 $zipPath = Join-Path $env:TEMP $assetName
 Write-Host "    Downloading to $zipPath..."
-Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing
+Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zipPath -UseBasicParsing -TimeoutSec 3600
 Write-Success "Download complete."
 
+if ((Get-Item $zipPath).Length -lt 1MB) {
+    throw "Downloaded file is unexpectedly small — possible failed download"
+}
+
+# Download checksum file
+$checksumsAsset = $release.assets | Where-Object {
+    $_.name -match "^sha256.*\.txt$"
+} | Select-Object -First 1
+
+if (-not $checksumsAsset) {
+    throw "Could not find SHA256 checksum file in release"
+}
+
+$checksumsUrl = $checksumsAsset.browser_download_url
+$checksumsPath = Join-Path $env:TEMP "syncthing-sha256.txt"
+
+Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -TimeoutSec 300
+
+# Extract expected hash
+$expectedHash = Get-Content $checksumsPath | ForEach-Object {
+    if ($_ -match "^\s*([a-fA-F0-9]{64})\s+\*?$([regex]::Escape($assetName))\s*$") {
+        $matches[1]
+    }
+} | Select-Object -First 1
+
+# Cleanup
+Remove-Item $checksumsPath -Force -ErrorAction SilentlyContinue
+
+if (-not $expectedHash) {
+    throw "Failed to find exact checksum entry for $assetName"
+}
+
+# Compute actual hash
+$actualHash = (Get-FileHash -Path $zipPath -Algorithm SHA256).Hash.ToLower()
+
+if ($actualHash -ne $expectedHash.ToLower()) {
+    throw "Checksum verification failed for $assetName"
+}
+
 # Stop any existing syncthing process
-if (Get-Process "syncthing" -ErrorAction SilentlyContinue) {
-    Stop-Process -Name "syncthing" -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 2
+Get-Process "syncthing" -ErrorAction SilentlyContinue | ForEach-Object {
+    try {
+        if ($_.Path -eq $SyncthingExe) {
+            Stop-Process -Id $_.Id -Force
+        }
+    } catch {}
+}
+
+# Bypass Windows execution locks by renaming the existing file
+if (Test-Path $SyncthingExe) {
+    $oldExe = "$SyncthingExe.old"
+
+    if (Test-Path $oldExe) {
+        Remove-Item $oldExe -Force -ErrorAction SilentlyContinue
+    }
+
+    Move-Item -Path $SyncthingExe -Destination $oldExe -Force
 }
 
 # ─────────────────────────────────────────────
@@ -111,19 +168,35 @@ if (-not (Test-Path $InstallDir)) {
 }
 
 # Extract zip
-$extractTemp = Join-Path $env:TEMP "syncthing-extract"
+$extractTemp = Join-Path $env:TEMP ("syncthing-extract-" + [guid]::NewGuid())
 if (Test-Path $extractTemp) { Remove-Item $extractTemp -Recurse -Force }
 Expand-Archive -Path $zipPath -DestinationPath $extractTemp -Force
 
-# The zip contains a subdirectory e.g. syncthing-windows-amd64-v1.x.x\
-$extractedDir = Get-ChildItem $extractTemp -Directory | Select-Object -First 1
-$sourceExe     = Join-Path $extractedDir.FullName "syncthing.exe"
+# Cleanup
+Remove-Item $zipPath -Force
 
-Copy-Item -Path $sourceExe -Destination $SyncthingExe -Force
+# Locate syncthing.exe
+$sourceExe = Get-ChildItem -Path $extractTemp -Recurse -Filter "syncthing.exe" | Select-Object -First 1
+
+if (-not $sourceExe) {
+    throw "syncthing.exe not found in extracted archive"
+}
+
+if (-not (Test-Path $sourceExe.FullName)) {
+    throw "Extracted syncthing.exe is missing or inaccessible"
+}
+
+# Validate signature
+$signature = Get-AuthenticodeSignature $sourceExe.FullName
+
+if ($signature.Status -ne 'Valid') {
+    Write-Warn "Signature check failed or not present: $($signature.Status)"
+}
+
+Copy-Item -Path $sourceExe.FullName -Destination $SyncthingExe -Force
 Write-Success "syncthing.exe installed to $SyncthingExe"
 
 # Cleanup
-Remove-Item $zipPath -Force
 Remove-Item $extractTemp -Recurse -Force
 
 # ─────────────────────────────────────────────
@@ -134,7 +207,10 @@ Write-Step "Generating Syncthing configuration..."
 
 # Only do this if config doesn't already exist
 if (-not (Test-Path $ConfigPath)) {
-    & $SyncthingExe generate | Out-Null
+    Start-Process -FilePath $SyncthingExe `
+        -ArgumentList "generate" `
+        -NoNewWindow `
+        -Wait
     Write-Success "Configuration generated."
 } else {
     Write-Success "Configuration already exists, skipping generation."
@@ -146,11 +222,28 @@ if (-not (Test-Path $ConfigPath)) {
 
 Write-Step "Setting GUI port in config.xml..."
 
-[xml]$configXml = Get-Content $ConfigPath
+for ($i = 0; $i -lt 10; $i++) {
+    if (Test-Path $ConfigPath) {
+        try {
+            [xml]$configXml = Get-Content $ConfigPath -ErrorAction Stop
+            break
+        } catch {}
+    }
+    Start-Sleep -Milliseconds 500
+}
+
+if (-not $configXml) {
+    throw "Failed to safely read config.xml"
+}
 
 # Update the GUI port permanently in the XML
-if ($configXml.configuration.gui.address -ne "127.0.0.1:$GuiPort") {
-    $configXml.configuration.gui.address = "127.0.0.1:$GuiPort"
+$guiNode = $configXml.configuration.gui
+if (-not $guiNode) {
+    throw "Invalid config.xml: missing <gui> node"
+}
+
+if ($guiNode.address -ne "127.0.0.1:$GuiPort") {
+    $guiNode.address = "127.0.0.1:$GuiPort"
     $configXml.Save($ConfigPath)
     Write-Success "Updated config.xml GUI address to 127.0.0.1:$GuiPort"
 } else {
@@ -169,7 +262,7 @@ if (Get-ScheduledTask -TaskName $TaskNameStart -ErrorAction SilentlyContinue) {
 }
 
 $startAction = New-ScheduledTaskAction `
-    -Execute "`"$SyncthingExe`"" `
+    -Execute $SyncthingExe `
     -Argument "--no-browser --no-console"
 
 # Trigger: at logon of current user, with startup delay
