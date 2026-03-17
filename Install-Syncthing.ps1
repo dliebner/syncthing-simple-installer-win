@@ -447,3 +447,5 @@ Write-Host "  - Run $UninstallScriptPath"
 Write-Host "  - Delete $InstallDir"
 Write-Host "  - (Optional) Delete config and db at $env:LOCALAPPDATA\Syncthing"
 Write-Host ""
+
+Read-Host "Press Enter to exit...
