@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
     Installs and configures Syncthing as a scheduled task on Windows.
@@ -13,8 +13,6 @@
 .NOTES
     Run this script as the user who will be running Syncthing.
     Firewall rule creation requires admin privileges (script will prompt via UAC).
-
-    Run Command: powershell.exe -ExecutionPolicy Bypass -File .\Install-Syncthing.ps1
 
 .PARAMETER InstallDir
     Directory to install Syncthing. Defaults to %LOCALAPPDATA%\Syncthing.
