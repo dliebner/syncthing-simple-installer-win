@@ -304,6 +304,7 @@ $settings = New-ScheduledTaskSettingsSet `
     -AllowStartIfOnBatteries
 
 $settings.ExecutionTimeLimit = "PT0S" # No time limit
+$settings.IdleSettings.StopOnIdleEnd = $false # Uncheck "Stop if computer ceases to be idle"
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId $currentUser `
