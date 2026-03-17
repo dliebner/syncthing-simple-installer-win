@@ -44,7 +44,6 @@ $ErrorActionPreference = 'Stop'
 $TaskNameStart    = "Syncthing - Start at Logon ($env:USERNAME)"
 $FirewallRuleName = "Syncthing ($env:USERNAME)"
 $SyncthingExe     = Join-Path $InstallDir "syncthing.exe"
-$ApiBase          = "http://localhost:$GuiPort/rest"
 $ConfigPath       = Join-Path $env:LOCALAPPDATA "Syncthing\config.xml"
 
 # ─────────────────────────────────────────────
@@ -66,50 +65,6 @@ function Write-Warn {
     Write-Host "    WARN: $Message" -ForegroundColor Yellow
 }
 
-function Get-SyncthingApiKey {
-    <#
-    Reads the API key from Syncthing's config.xml.
-    Syncthing generates this on first run.
-    #>
-    if (-not (Test-Path $ConfigPath)) {
-        return $null
-    }
-    [xml]$config = Get-Content $ConfigPath
-    return $config.configuration.gui.apikey
-}
-
-function Wait-SyncthingReady {
-    <#
-    Polls the Syncthing API until it responds or times out.
-    Returns $true if ready, $false if timed out.
-    #>
-    param(
-        [System.Diagnostics.Process]$Process,
-        [int]$TimeoutSeconds = 30
-    )
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    Write-Host "    Waiting for Syncthing to start..." -NoNewline
-    while ((Get-Date) -lt $deadline) {
-        if ($Process -and $Process.HasExited) {
-            Write-Host " failed! Process exited unexpectedly." -ForegroundColor Red
-            return $false
-        }
-        try {
-            $apiKey = Get-SyncthingApiKey
-            if ($apiKey) {
-                Invoke-RestMethod -Uri "$ApiBase/system/ping" `
-                    -Headers @{ "X-API-Key" = $apiKey } `
-                    -TimeoutSec 2 | Out-Null
-                Write-Host " ready." -ForegroundColor Green
-                return $true
-            }
-        } catch { }
-        Write-Host "." -NoNewline
-        Start-Sleep -Seconds 2
-    }
-    Write-Host " timed out." -ForegroundColor Yellow
-    return $false
-}
 
 # ─────────────────────────────────────────────
 # STEP 1: DOWNLOAD SYNCTHING
@@ -162,9 +117,9 @@ Expand-Archive -Path $zipPath -DestinationPath $extractTemp -Force
 
 # The zip contains a subdirectory e.g. syncthing-windows-amd64-v1.x.x\
 $extractedDir = Get-ChildItem $extractTemp -Directory | Select-Object -First 1
-$sourcExe     = Join-Path $extractedDir.FullName "syncthing.exe"
+$sourceExe     = Join-Path $extractedDir.FullName "syncthing.exe"
 
-Copy-Item -Path $sourcExe -Destination $SyncthingExe -Force
+Copy-Item -Path $sourceExe -Destination $SyncthingExe -Force
 Write-Success "syncthing.exe installed to $SyncthingExe"
 
 # Cleanup
@@ -175,34 +130,14 @@ Remove-Item $extractTemp -Recurse -Force
 # STEP 3: FIRST RUN (generate config + API key)
 # ─────────────────────────────────────────────
 
-Write-Step "Running Syncthing briefly to generate configuration..."
+Write-Step "Generating Syncthing configuration..."
 
 # Only do this if config doesn't already exist
 if (-not (Test-Path $ConfigPath)) {
-    $proc = Start-Process -FilePath $SyncthingExe `
-        -ArgumentList "--no-browser", "--no-console", "--gui-address=127.0.0.1:$GuiPort" `
-        -WindowStyle Hidden `
-        -PassThru
-    $ready = Wait-SyncthingReady -Process $proc -TimeoutSeconds 45
-
-    if ($ready) {
-        # Gracefully shut down via API now that we have the key
-        $apiKey = Get-SyncthingApiKey
-        try {
-            Invoke-RestMethod -Method Post -Uri "$ApiBase/system/shutdown" `
-                -Headers @{ "X-API-Key" = $apiKey } | Out-Null
-        } catch { }
-        Wait-Process -Id $proc.Id -Timeout 15 -ErrorAction SilentlyContinue
-    }
-
-    # Fallback: kill process if API shutdown didn't work
-    if (-not $proc.HasExited) {
-        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
-    }
-
+    & $SyncthingExe generate | Out-Null
     Write-Success "Configuration generated."
 } else {
-    Write-Success "Configuration already exists, skipping first run."
+    Write-Success "Configuration already exists, skipping generation."
 }
 
 # ─────────────────────────────────────────────
@@ -223,20 +158,7 @@ if ($configXml.configuration.gui.address -ne "127.0.0.1:$GuiPort") {
 }
 
 # ─────────────────────────────────────────────
-# STEP 5: READ API KEY
-# ─────────────────────────────────────────────
-
-Write-Step "Reading API key from Syncthing configuration..."
-
-$apiKey = Get-SyncthingApiKey
-if (-not $apiKey) {
-    throw "Could not read API key from Syncthing config at $ConfigPath. " +
-          "Try running the script again after Syncthing has initialised."
-}
-Write-Success "API key retrieved."
-
-# ─────────────────────────────────────────────
-# STEP 6: TASK SCHEDULER - START AT LOGON
+# STEP 5: TASK SCHEDULER - START AT LOGON
 # ─────────────────────────────────────────────
 
 Write-Step "Creating scheduled task: '$TaskNameStart'..."
@@ -246,12 +168,9 @@ if (Get-ScheduledTask -TaskName $TaskNameStart -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskNameStart -Confirm:$false
 }
 
-# Escape single quotes in path if present
-$safeExeTask = $SyncthingExe -replace "'", "''"
-
 $startAction = New-ScheduledTaskAction `
-    -Execute "powershell.exe" `
-    -Argument "-WindowStyle Hidden -NoProfile -Command `"Start-Process -FilePath '$safeExeTask' -ArgumentList '--no-browser', '--no-console' -WindowStyle Hidden`""
+    -Execute "`"$SyncthingExe`"" `
+    -Argument "--no-browser --no-console"
 
 # Trigger: at logon of current user, with startup delay
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
@@ -259,12 +178,13 @@ $startTrigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
 $startTrigger.Delay = "PT${StartupDelay}S"   # ISO 8601 duration
 
 $settings = New-ScheduledTaskSettingsSet `
+    -Hidden `
     -RestartCount 3 `
     -RestartInterval (New-TimeSpan -Minutes 1) `
     -DontStopIfGoingOnBatteries `
     -AllowStartIfOnBatteries
 
-$settings.ExecutionTimeLimit = "PT0S" # No time limit (the ISO 8601 string for zero seconds)
+$settings.ExecutionTimeLimit = "PT0S" # No time limit
 
 $principal = New-ScheduledTaskPrincipal `
     -UserId $currentUser `
@@ -282,7 +202,7 @@ Register-ScheduledTask `
 Write-Success "Start task created."
 
 # ─────────────────────────────────────────────
-# STEP 7: FIREWALL RULE
+# STEP 6: FIREWALL RULE
 # ─────────────────────────────────────────────
 
 Write-Step "Adding Windows Firewall rule for Syncthing..."
