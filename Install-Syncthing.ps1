@@ -14,7 +14,7 @@
     Run this script as the user who will be running Syncthing.
     Firewall rule creation requires admin privileges (script will prompt via UAC).
 
-    Run Command: Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass; .\Install-Syncthing.ps1
+    Run Command: powershell.exe -ExecutionPolicy Bypass -File .\Install-Syncthing.ps1
 
 .PARAMETER InstallDir
     Directory to install Syncthing. Defaults to %LOCALAPPDATA%\Syncthing.
@@ -126,7 +126,7 @@ if ($checksumsUrl -notmatch "^https://github\.com/syncthing/syncthing/releases/d
 }
 
 $checksumsPath = Join-Path $env:TEMP "syncthing-sha256.txt"
-Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -TimeoutSec 300
+Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -UseBasicParsing -TimeoutSec 300
 
 # Extract expected hash
 $expectedHash = Get-Content $checksumsPath | ForEach-Object {
@@ -150,21 +150,21 @@ if ($actualHash -ne $expectedHash.ToLower()) {
 }
 
 # Stop any existing syncthing process
-$targetPath = Resolve-Path $SyncthingExe
+if (Test-Path $SyncthingExe) {
+    $targetPath = (Resolve-Path $SyncthingExe).Path
 
-Get-Process "syncthing" -ErrorAction SilentlyContinue | ForEach-Object {
-    try {
-        $path = $_.Path
-        if ($path) {
-            $resolved = Resolve-Path $path -ErrorAction SilentlyContinue
-            if ($resolved -and $resolved -eq $targetPath) {
-                Stop-Process -Id $_.Id -Force
-                Wait-Process -Id $_.Id -Timeout 10 -ErrorAction SilentlyContinue
+    Get-Process "syncthing" -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            if ($_.Path) {
+                $resolved = (Resolve-Path $_.Path -ErrorAction SilentlyContinue).Path
+                if ($resolved -and $resolved -eq $targetPath) {
+                    Stop-Process -Id $_.Id -Force
+                    Wait-Process -Id $_.Id -Timeout 10 -ErrorAction SilentlyContinue
+                }
             }
-        }
-    } catch {}
+        } catch {}
+    }
 }
-
 # Bypass Windows execution locks by renaming the existing file
 if (Test-Path $SyncthingExe) {
     $oldExe = "$SyncthingExe.old"
@@ -289,7 +289,7 @@ if (Get-ScheduledTask -TaskName $TaskNameStart -ErrorAction SilentlyContinue) {
 
 $startAction = New-ScheduledTaskAction `
     -Execute "conhost.exe" `
-    -Argument "`"$SyncthingExe`" --no-browser --no-console"
+    -Argument "`"$SyncthingExe`" serve --no-browser --no-console"
 
 # Trigger: at logon of current user, with startup delay
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
