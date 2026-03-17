@@ -74,11 +74,15 @@ Write-Step "Fetching latest Syncthing release from GitHub..."
 
 $releaseApi = "https://api.github.com/repos/syncthing/syncthing/releases/latest"
 $release    = Invoke-RestMethod -Uri $releaseApi -UseBasicParsing
-$version    = $release.tag_name
 
-if (-not $release -or -not $release.assets) {
+# Safely check for properties to respect StrictMode constraints
+if (-not $release -or 
+    'tag_name' -notin $release.psobject.Properties.Name -or 
+    'assets' -notin $release.psobject.Properties.Name) {
     throw "Failed to fetch valid release data from GitHub API"
 }
+
+$version = $release.tag_name
 
 # Determine architecture
 $isArm = ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -match 'ARM64')
@@ -88,6 +92,10 @@ $asset     = $release.assets | Where-Object { $_.name -eq $assetName }
 
 if (-not $asset) {
     throw "Could not find release asset '$assetName' in GitHub release $version."
+}
+
+if ($asset.browser_download_url -notmatch "^https://github\.com/syncthing/syncthing/releases/download/") {
+    throw "Unexpected download URL: $($asset.browser_download_url)"
 }
 
 Write-Success "Found Syncthing $version ($assetName)"
@@ -112,8 +120,12 @@ if (-not $checksumsAsset) {
 }
 
 $checksumsUrl = $checksumsAsset.browser_download_url
-$checksumsPath = Join-Path $env:TEMP "syncthing-sha256.txt"
 
+if ($checksumsUrl -notmatch "^https://github\.com/syncthing/syncthing/releases/download/") {
+    throw "Unexpected checksum URL: $checksumsUrl"
+}
+
+$checksumsPath = Join-Path $env:TEMP "syncthing-sha256.txt"
 Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsPath -TimeoutSec 300
 
 # Extract expected hash
@@ -138,10 +150,17 @@ if ($actualHash -ne $expectedHash.ToLower()) {
 }
 
 # Stop any existing syncthing process
+$targetPath = Resolve-Path $SyncthingExe
+
 Get-Process "syncthing" -ErrorAction SilentlyContinue | ForEach-Object {
     try {
-        if ($_.Path -eq $SyncthingExe) {
-            Stop-Process -Id $_.Id -Force
+        $path = $_.Path
+        if ($path) {
+            $resolved = Resolve-Path $path -ErrorAction SilentlyContinue
+            if ($resolved -and $resolved -eq $targetPath) {
+                Stop-Process -Id $_.Id -Force
+                Wait-Process -Id $_.Id -Timeout 10 -ErrorAction SilentlyContinue
+            }
         }
     } catch {}
 }
@@ -207,10 +226,15 @@ Write-Step "Generating Syncthing configuration..."
 
 # Only do this if config doesn't already exist
 if (-not (Test-Path $ConfigPath)) {
-    Start-Process -FilePath $SyncthingExe `
+    $proc = Start-Process -FilePath $SyncthingExe `
         -ArgumentList "generate" `
         -NoNewWindow `
+        -PassThru `
         -Wait
+
+    if ($proc.ExitCode -ne 0) {
+        throw "Syncthing generate failed with exit code $($proc.ExitCode)"
+    }
     Write-Success "Configuration generated."
 } else {
     Write-Success "Configuration already exists, skipping generation."
@@ -244,7 +268,9 @@ if (-not $guiNode) {
 
 if ($guiNode.address -ne "127.0.0.1:$GuiPort") {
     $guiNode.address = "127.0.0.1:$GuiPort"
-    $configXml.Save($ConfigPath)
+    $tempConfig = "$ConfigPath.tmp"
+    $configXml.Save($tempConfig)
+    Move-Item -Path $tempConfig -Destination $ConfigPath -Force
     Write-Success "Updated config.xml GUI address to 127.0.0.1:$GuiPort"
 } else {
     Write-Success "GUI address is already set correctly in config.xml."
@@ -262,8 +288,8 @@ if (Get-ScheduledTask -TaskName $TaskNameStart -ErrorAction SilentlyContinue) {
 }
 
 $startAction = New-ScheduledTaskAction `
-    -Execute $SyncthingExe `
-    -Argument "--no-browser --no-console"
+    -Execute "conhost.exe" `
+    -Argument "`"$SyncthingExe`" --no-browser --no-console"
 
 # Trigger: at logon of current user, with startup delay
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
