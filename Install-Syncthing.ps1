@@ -5,10 +5,10 @@
 
 .DESCRIPTION
     - Downloads the latest Syncthing release directly from GitHub
-    - Installs to %LOCALAPPDATA%\Syncthing (allows Syncthing to self-update)
+    - Installs to %LOCALAPPDATA%\Programs\Syncthing (allows Syncthing to self-update)
     - Creates a Task Scheduler task to start Syncthing at user logon
     - Adds a Windows Firewall rule for Syncthing
-    - No third-party installers, no phone-home mechanisms
+    - Starts Syncthing immediately after installation
 
 .NOTES
     Run this script as the user who will be running Syncthing.
@@ -29,7 +29,7 @@
 #>
 
 param(
-    [string]$InstallDir = "$env:LOCALAPPDATA\Syncthing",
+    [string]$InstallDir = "$env:LOCALAPPDATA\Programs\Syncthing",
     [int]$GuiPort = 8384,
     [int]$StartupDelay = 30
 )
@@ -41,8 +41,8 @@ $ErrorActionPreference = 'Stop'
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
-$TaskNameStart    = "Syncthing - Start at Logon"
-$FirewallRuleName = "Syncthing"
+$TaskNameStart    = "Syncthing - Start at Logon ($env:USERNAME)"
+$FirewallRuleName = "Syncthing ($env:USERNAME)"
 $SyncthingExe     = Join-Path $InstallDir "syncthing.exe"
 $ApiBase          = "http://localhost:$GuiPort/rest"
 $ConfigPath       = Join-Path $env:LOCALAPPDATA "Syncthing\config.xml"
@@ -87,6 +87,10 @@ function Wait-SyncthingReady {
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
     Write-Host "    Waiting for Syncthing to start..." -NoNewline
     while ((Get-Date) -lt $deadline) {
+        if ($Process -and $Process.HasExited) {
+            Write-Host " failed! Process exited unexpectedly." -ForegroundColor Red
+            return $false
+        }
         try {
             $apiKey = Get-SyncthingApiKey
             if ($apiKey) {
@@ -115,13 +119,8 @@ $release    = Invoke-RestMethod -Uri $releaseApi -UseBasicParsing
 $version    = $release.tag_name
 
 # Determine architecture
-$arch = if ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') {
-    "arm64"
-} elseif ([Environment]::Is64BitOperatingSystem) { 
-    "amd64" 
-} else { 
-    "386" 
-}
+$isArm = ($env:PROCESSOR_ARCHITECTURE -match 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -match 'ARM64')
+$arch = if ($isArm) { "arm64" } elseif ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
 $assetName = "syncthing-windows-$arch-$version.zip"
 $asset     = $release.assets | Where-Object { $_.name -eq $assetName }
 
@@ -180,7 +179,7 @@ if (-not (Test-Path $ConfigPath)) {
     $proc = Start-Process -FilePath $SyncthingExe `
         -ArgumentList "--no-browser", "--no-console", "--gui-address=127.0.0.1:$GuiPort" `
         -PassThru
-    $ready = Wait-SyncthingReady -TimeoutSeconds 45
+    $ready = Wait-SyncthingReady -Process $proc -TimeoutSeconds 45
 
     if ($ready) {
         # Gracefully shut down via API now that we have the key
@@ -193,7 +192,9 @@ if (-not (Test-Path $ConfigPath)) {
     }
 
     # Fallback: kill process if API shutdown didn't work
-    if (-not $proc.HasExited) { $proc.Kill() }
+    if (-not $proc.HasExited) {
+        Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+    }
 
     Write-Success "Configuration generated."
 } else {
@@ -259,7 +260,7 @@ $settings = New-ScheduledTaskSettingsSet `
 $settings.ExecutionTimeLimit = "PT0S" # No time limit (the ISO 8601 string for zero seconds)
 
 $principal = New-ScheduledTaskPrincipal `
-    -UserId "$env:USERDOMAIN\$env:USERNAME" `
+    -UserId $currentUser `
     -LogonType Interactive `
     -RunLevel Limited
 
@@ -293,20 +294,29 @@ if ($isAdmin) {
         -Direction Inbound `
         -Program $SyncthingExe `
         -Action Allow `
-        -Profile Any | Out-Null
+        -Profile @("Private","Domain") | Out-Null
 
     Write-Success "Firewall rule created."
 } else {
     Write-Warn "Prompting for Admin privileges to add the Firewall Rule..."
-    $fwScript = "Remove-NetFirewallRule -DisplayName '$FirewallRuleName' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName '$FirewallRuleName' -Direction Inbound -Program '$SyncthingExe' -Action Allow -Profile Any"
+    $safeExe = $SyncthingExe -replace "'", "''"
+    $fwScript = "Remove-NetFirewallRule -DisplayName '$FirewallRuleName' -ErrorAction SilentlyContinue; New-NetFirewallRule -DisplayName '$FirewallRuleName' -Direction Inbound -Program '$safeExe' -Action Allow -Profile @('Private','Domain')"
     $encoded  = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fwScript))
-    Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encoded" -Wait
-    Write-Success "Firewall rule creation finished."
+    try {
+        Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $encoded" -Wait
+        Write-Success "Firewall rule creation finished."
+    } catch {
+        Write-Warn "UAC prompt was canceled. Firewall rule was not created."
+    }
 }
 
 # ─────────────────────────────────────────────
 # DONE
 # ─────────────────────────────────────────────
+
+Write-Step "Starting Syncthing..."
+Start-ScheduledTask -TaskName $TaskNameStart
+Write-Success "Syncthing is now running in the background."
 
 Write-Host ""
 Write-Host "─────────────────────────────────────────────" -ForegroundColor Cyan
@@ -318,11 +328,11 @@ Write-Host "  Web UI       : http://localhost:$GuiPort"
 Write-Host "  Start task   : $TaskNameStart (delay: ${StartupDelay}s after logon)"
 Write-Host ""
 Write-Host "  Next steps:"
-Write-Host "  1. Log off and back on (or start Syncthing manually from $SyncthingExe)"
-Write-Host "  2. Open http://localhost:$GuiPort to configure Syncthing"
+Write-Host "  1. Open http://localhost:$GuiPort to configure Syncthing"
 Write-Host ""
 Write-Host "  To uninstall:"
 Write-Host "  - Delete $InstallDir"
 Write-Host "  - Remove scheduled task '$TaskNameStart'"
 Write-Host "  - Remove firewall rule '$FirewallRuleName'"
+Write-Host "  - Optional: Delete config and db at $env:LOCALAPPDATA\Syncthing"
 Write-Host ""
