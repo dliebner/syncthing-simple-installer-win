@@ -24,3 +24,23 @@ If you run the script from a terminal, you can customize the installation using 
 * `-InstallDir` (Default: `%LOCALAPPDATA%\Programs\Syncthing`)
 * `-GuiPort` (Default: `8384`)
 * `-StartupDelay` (Default: `30` seconds)
+
+## Running on Windows 11
+Windows 11 restricts running PowerShell scripts by default. Here are two ways to run:
+
+### Option 1: Right-click method
+1. **Right-click** `Install-Syncthing.ps1` and select **Run with PowerShell**.
+
+#### Unblocking the script
+If the above doesn't work, you may need to unblock the script.
+1. **Right-click** `Install-Syncthing.ps1` > **Properties**.
+2. At the bottom, check the **Unblock** box and click **OK**.
+3. You can now run the script normally.
+
+### Option 2: Run in PowerShell terminal with a One-Time Exception
+1. Open **PowerShell** (search for it in the Start menu).
+2. `cd` to the directory containing `Install-Syncthing.ps1`
+3. Run this command to start the installer with a temporary bypass:
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\Install-Syncthing.ps1
+```
