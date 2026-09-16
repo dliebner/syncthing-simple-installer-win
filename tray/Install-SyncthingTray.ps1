@@ -279,32 +279,54 @@ foreach ($dir in $ShortcutDirs) {
 
 Write-Step "Starting Syncthing Monitor..."
 
-# Through the task, so this exercises exactly the path used at logon.
-Start-ScheduledTask -TaskName $TaskName
-$deadline = (Get-Date).AddSeconds(10)
-while (-not (Get-TrayProcess) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
-if (Get-TrayProcess) {
-    Write-Success "Running now, and will start automatically at logon."
-} else {
-    Write-Warn "The task was triggered but no tray process appeared within 10s."
+# Through the task, so this exercises exactly the path used at logon. If an
+# allow-list antivirus blocks the launch, its prompt (if enabled) appears right
+# here; we wait for the user to deal with it and retry, so one run of this
+# script is enough.
+function Start-TrayAndWait {
+    Start-ScheduledTask -TaskName $TaskName
+    $deadline = (Get-Date).AddSeconds(10)
+    while (-not (Get-TrayProcess) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+    return [bool](Get-TrayProcess)
+}
+
+function Write-TaskDiagnostics {
     # Report what Task Scheduler thinks happened, so a block can be told apart
     # from a misconfigured task or a script that exited on its own.
     $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
     $task = Get-ScheduledTask     -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($info -and $task) {
-        $code = "0x{0:X}" -f $info.LastTaskResult
-        $hint = switch ($info.LastTaskResult) {
-            0          { "the process started and exited immediately (typical of antivirus blocking it, or the script failing at startup)" }
-            0x80070005 { "'Access is denied': Task Scheduler was refused when launching powershell.exe, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
-            0x41301    { "Task Scheduler says it is still running, so the tray process may simply not have been found by name" }
-            0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
-            0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
-            default    { "see Task Scheduler > Task Scheduler Library > '$TaskName' > History" }
-        }
-        Write-Warn "Task state: $($task.State); last result: $code, i.e. $hint."
+    if (-not ($info -and $task)) { return }
+    $code = "0x{0:X}" -f $info.LastTaskResult
+    $hint = switch ($info.LastTaskResult) {
+        0          { "the process started and exited immediately (typical of antivirus blocking it, or the script failing at startup)" }
+        0x80070005 { "'Access is denied': Task Scheduler was refused when launching powershell.exe, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
+        0x41301    { "Task Scheduler says it is still running, so the tray process may simply not have been found by name" }
+        0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
+        0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
+        default    { "see Task Scheduler > Task Scheduler Library > '$TaskName' > History" }
     }
-    Write-Warn "If antivirus (e.g. PC Matic SuperShield) is blocking it, allow powershell.exe running"
-    Write-Warn "SyncthingTray.ps1 from $InstallDir, then run this script again."
+    Write-Warn "Task state: $($task.State); last result: $code, i.e. $hint."
+}
+
+$started = Start-TrayAndWait
+while (-not $started) {
+    Write-Warn "The task was triggered but no tray process appeared within 10s."
+    Write-TaskDiagnostics
+    Write-Host ""
+    Write-Host "    If your antivirus just prompted about powershell.exe, choose its 'always allow' option." -ForegroundColor Yellow
+    Write-Host "    If it blocked silently, open it and allow powershell.exe running SyncthingTray.ps1 from" -ForegroundColor Yellow
+    Write-Host "    $InstallDir (PC Matic: SuperShield > Blocking Notification Method >" -ForegroundColor Yellow
+    Write-Host "    'Prompt for Override', then retry here and click 'Always Allow')." -ForegroundColor Yellow
+    Write-Host ""
+    $answer = Read-Host "    Press Enter to try again, or type S to skip for now"
+    if ($answer -match '^[sS]') {
+        Write-Warn "Skipped. The task stays registered; run this script again once the launch is allowed."
+        break
+    }
+    $started = Start-TrayAndWait
+}
+if ($started) {
+    Write-Success "Running now, and will start automatically at logon."
 }
 
 Write-Host ""
