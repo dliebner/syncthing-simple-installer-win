@@ -168,7 +168,7 @@ function Invoke-WhitelistAssist {
     try {
         Start-Process explorer.exe -ArgumentList "/select,`"$Path`""
     } catch {
-        Write-Warn "Couldn't open Explorer automatically. Open this folder and double-click $ExeName:"
+        Write-Warn "Couldn't open Explorer automatically. Open this folder and double-click ${ExeName}:"
         Write-Warn "  $Path"
     }
     [void](Read-Host "    Once you've allowed $ExeName, press Enter to continue")
