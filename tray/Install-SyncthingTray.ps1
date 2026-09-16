@@ -149,19 +149,19 @@ function Invoke-WhitelistAssist {
     Write-Host ""
     if (Test-PCMatic) {
         Write-Host "    PC Matic (SuperShield) is running and is blocking $ExeName." -ForegroundColor Yellow
-        Write-Host "    It blocks unknown programs that are started by a script or a scheduled task," -ForegroundColor Yellow
-        Write-Host "    which is why only powershell.exe shows in its blocked list, not $ExeName," -ForegroundColor Yellow
-        Write-Host "    and why no allow prompt appeared. Starting it once by hand fixes that:" -ForegroundColor Yellow
     } else {
-        Write-Host "    An allow-list antivirus is blocking $ExeName (a freshly compiled program is" -ForegroundColor Yellow
-        Write-Host "    unknown to these products). Starting it once by hand lets you allow it:" -ForegroundColor Yellow
+        Write-Host "    An allow-list antivirus is blocking $ExeName." -ForegroundColor Yellow
     }
+    Write-Host "    A freshly compiled program is unknown to these products, and they block it" -ForegroundColor Yellow
+    Write-Host "    hardest when a script or scheduled task launches it: the block is logged" -ForegroundColor Yellow
+    Write-Host "    against the launcher (e.g. powershell.exe), not $ExeName, so no prompt appears." -ForegroundColor Yellow
+    Write-Host "    Starting it once by hand lets you allow it:" -ForegroundColor Yellow
     Write-Host ""
     Write-Host "      1. An Explorer window will open with $ExeName selected." -ForegroundColor Yellow
     Write-Host "      2. Double-click $ExeName." -ForegroundColor Yellow
     Write-Host "      3. When your antivirus notifies or blocks it, choose Allow / Always Allow." -ForegroundColor Yellow
-    Write-Host "         (Or open PC Matic > SuperShield, find $ExeName in the recently blocked" -ForegroundColor Yellow
-    Write-Host "          list, and whitelist it there - it will be listed by name now.)" -ForegroundColor Yellow
+    Write-Host "         (Or open your antivirus, find $ExeName in its blocked/quarantine list," -ForegroundColor Yellow
+    Write-Host "          and whitelist it there - it will be listed by name now.)" -ForegroundColor Yellow
     Write-Host "      It's fine if nothing visible happens: the tray icon has no window." -ForegroundColor Yellow
     Write-Host ""
 
