@@ -6,4 +6,7 @@
 Dim shell, scriptDir
 Set shell = CreateObject("WScript.Shell")
 scriptDir = Left(WScript.ScriptFullName, InStrRev(WScript.ScriptFullName, "\"))
+' Run the tray from its own folder, whatever folder this .vbs was launched from,
+' so the tray process never keeps some other folder locked as "in use".
+shell.CurrentDirectory = scriptDir
 shell.Run "powershell.exe -NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -File """ & scriptDir & "SyncthingTray.ps1""", 0, False

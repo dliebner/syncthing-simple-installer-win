@@ -196,7 +196,9 @@ Write-Step "Starting Syncthing Monitor..."
 # Stop any running instance first: its single-instance guard would otherwise
 # keep the old copy running (matters when re-running this to upgrade).
 if (Get-TrayProcess) { Stop-TrayMonitor }
-Start-Process "wscript.exe" -ArgumentList """$launcher"""
+# -WorkingDirectory matters: the tray process would otherwise inherit this
+# script's current folder and keep it locked ("in use") until it exits.
+Start-Process "wscript.exe" -ArgumentList """$launcher""" -WorkingDirectory $InstallDir
 Write-Success "Running now, and will start automatically at logon."
 
 Write-Host ""
