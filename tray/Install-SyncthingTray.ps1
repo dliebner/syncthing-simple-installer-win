@@ -287,7 +287,23 @@ if (Get-TrayProcess) {
     Write-Success "Running now, and will start automatically at logon."
 } else {
     Write-Warn "The task was triggered but no tray process appeared within 10s."
-    Write-Warn "If antivirus is blocking it, allow powershell.exe running SyncthingTray.ps1 from $InstallDir."
+    # Report what Task Scheduler thinks happened, so a block can be told apart
+    # from a misconfigured task or a script that exited on its own.
+    $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask     -TaskName $TaskName -ErrorAction SilentlyContinue
+    if ($info -and $task) {
+        $code = "0x{0:X}" -f $info.LastTaskResult
+        $hint = switch ($info.LastTaskResult) {
+            0          { "the process started and exited immediately (typical of antivirus blocking it, or the script failing at startup)" }
+            0x41301    { "Task Scheduler says it is still running, so the tray process may simply not have been found by name" }
+            0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
+            0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
+            default    { "see Task Scheduler > Task Scheduler Library > '$TaskName' > History" }
+        }
+        Write-Warn "Task state: $($task.State); last result: $code, i.e. $hint."
+    }
+    Write-Warn "If antivirus (e.g. PC Matic SuperShield) is blocking it, allow powershell.exe running"
+    Write-Warn "SyncthingTray.ps1 from $InstallDir, then run this script again."
 }
 
 Write-Host ""
