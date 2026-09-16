@@ -132,6 +132,7 @@ namespace SyncthingMonitor
         // Talks to Syncthing over its local API. Self-signed certs (GUI TLS on) are
         // accepted, same as "curl -k".
         string baseUrl = "http://127.0.0.1:8384";
+        string fallbackUrl = "";   // loopback form of baseUrl to try if that doesn't answer
         string apiKey  = "";
 
         NotifyIcon notify;
@@ -153,6 +154,11 @@ namespace SyncthingMonitor
         {
             ServicePointManager.ServerCertificateValidationCallback =
                 delegate { return true; };
+            // Syncthing's GUI needs TLS 1.2 when its TLS is on, and older .NET Framework
+            // defaults don't offer it. Numeric values (Tls12 | Tls11) so this compiles
+            // against any 4.x.
+            try { ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072 | (SecurityProtocolType)768; }
+            catch (NotSupportedException) { }
 
             // --- Stop request from the installer/uninstaller (see Config.ExitEventName) ---
             exitEvent = new EventWaitHandle(false, EventResetMode.ManualReset, Config.ExitEventName);
@@ -228,17 +234,44 @@ namespace SyncthingMonitor
                 catch { }
             }
             baseUrl = scheme + "://" + address;
-            // If the badge ever reads red while Syncthing is clearly up, the scheme is
-            // likely wrong for this machine -- see the tls attribute of <gui> in config.xml.
+
+            // A second URL to try when the configured one doesn't answer. The GUI
+            // address is a *listen* address: "0.0.0.0:8384" (all interfaces, the usual
+            // setting for LAN access) or "[::]:8384" can't be *connected* to on Windows,
+            // and "localhost" may resolve to ::1 first. A browser gets away with that;
+            // HttpWebRequest doesn't. Loopback on the same port is what they all mean
+            // for a check from this machine.
+            fallbackUrl = "";
+            string host = address, port = "8384";
+            int colon = address.LastIndexOf(':');
+            if (colon >= 0 && address.IndexOf(']') < colon)
+            {
+                host = address.Substring(0, colon);
+                port = address.Substring(colon + 1);
+            }
+            host = host.Trim('[', ']').Trim();
+            if (port.Trim().Length == 0) port = "8384";
+            if (host != "127.0.0.1")
+                fallbackUrl = scheme + "://127.0.0.1:" + port.Trim();
         }
 
-        bool TestUp()
+        // All API calls go through here. No system proxy: a configured proxy or VPN
+        // client would otherwise be handed our loopback requests and drop them.
+        // Browsers bypass the proxy for local addresses; HttpWebRequest does not.
+        HttpWebRequest NewRequest(string url, int timeoutMs)
+        {
+            HttpWebRequest req = (HttpWebRequest)WebRequest.Create(url);
+            req.Proxy = null;
+            req.Timeout = timeoutMs;
+            req.ReadWriteTimeout = timeoutMs;
+            return req;
+        }
+
+        bool Probe(string url)
         {
             try
             {
-                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(baseUrl + "/rest/noauth/health");
-                req.Timeout = 3000;
-                req.ReadWriteTimeout = 3000;
+                HttpWebRequest req = NewRequest(url + "/rest/noauth/health", 3000);
                 using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
                 using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
                 {
@@ -247,6 +280,20 @@ namespace SyncthingMonitor
                 }
             }
             catch { return false; }
+        }
+
+        bool TestUp()
+        {
+            if (Probe(baseUrl)) return true;
+            if (fallbackUrl.Length > 0 && Probe(fallbackUrl))
+            {
+                // The loopback form is the one that answers; use it from now on
+                // (for Sync Now as well).
+                baseUrl = fallbackUrl;
+                fallbackUrl = "";
+                return true;
+            }
+            return false;
         }
 
         void StartFastPoll()
@@ -274,9 +321,8 @@ namespace SyncthingMonitor
             bool ok = false;
             try
             {
-                HttpWebRequest req = (HttpWebRequest)WebRequest.Create(baseUrl + "/rest/db/scan");
+                HttpWebRequest req = NewRequest(baseUrl + "/rest/db/scan", 10000);
                 req.Method = "POST";
-                req.Timeout = 10000;
                 req.ContentLength = 0;
                 req.Headers["X-API-Key"] = apiKey;
                 // GetResponse throws on HTTP errors (e.g. 403 from a bad API key), so an
