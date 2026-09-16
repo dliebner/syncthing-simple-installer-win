@@ -12,6 +12,19 @@
 #
 # Talks to Syncthing over its local API with curl.exe -k, so a self-signed
 # HTTPS cert (if GUI TLS is enabled) is a non-issue.
+#
+# Usage:
+#   SyncthingTray.ps1                     run the tray icon (normal use)
+#   SyncthingTray.ps1 -ExportIcon <path>  write the "running" icon as a multi-size
+#                                         .ico and exit. The installer uses this so
+#                                         the shortcuts get the same icon as the tray.
+
+param(
+    [string]$ExportIcon
+)
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 
 # --------------------------- CONFIG (edit if needed) ---------------------------
 # Folder that contains config.xml (Syncthing's home for this user).
@@ -36,14 +49,199 @@ $NotifyOnDown = $true
 # Invisible to the end user on a normal right-click. Set $false to remove entirely.
 $EnableShiftExit = $true
 
+# Badge colors.
+$ColorUp   = [System.Drawing.Color]::FromArgb(40, 170, 70)
+$ColorDown = [System.Drawing.Color]::FromArgb(200, 60, 60)
+
 # Named event that Install-SyncthingTray.ps1 / the uninstaller signal to ask a
 # running instance to exit cleanly (so its icon is removed, not left as a ghost).
 # Must match the name used in those scripts.
 $ExitEventName = "SyncthingTrayMonitor_Exit_$env:USERNAME"
 # -------------------------------------------------------------------------------
 
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
+# ============================== ICON DRAWING ==================================
+# Shared by the tray icon and by -ExportIcon, so the shortcut icon the installer
+# creates is drawn by exactly the same code as what sits in the tray.
+
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class ShellIcon {
+    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
+    public struct SHFILEINFO {
+        public IntPtr hIcon;
+        public int    iIcon;
+        public uint   dwAttributes;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string szDisplayName;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=80)]  public string szTypeName;
+    }
+    [DllImport("shell32.dll", CharSet=CharSet.Auto)]
+    public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
+    // Extracts an icon from a DLL rendered at an exact pixel size (up to 256).
+    [DllImport("user32.dll", CharSet=CharSet.Unicode)]
+    public static extern uint PrivateExtractIcons(string lpszFile, int nIconIndex, int cxIcon, int cyIcon, IntPtr[] phicon, uint[] piconid, uint nIcons, uint flags);
+    [DllImport("user32.dll", SetLastError=true)]
+    public static extern bool DestroyIcon(IntPtr hIcon);
+}
+"@
+
+# The stock Windows folder icon as a bitmap of the requested size.
+# Prefers an exact-size render from shell32.dll (crisp at 16..256); falls back
+# to the shell's 32px "folder" icon scaled, then to $null (caller draws one).
+function Get-FolderBitmap([int]$size) {
+    try {
+        $handles = New-Object IntPtr[] 1
+        $ids     = New-Object uint32[] 1
+        $n = [ShellIcon]::PrivateExtractIcons("shell32.dll", 3, $size, $size, $handles, $ids, 1, 0)
+        if ($n -ge 1 -and $handles[0] -ne [IntPtr]::Zero) {
+            $ficon = [System.Drawing.Icon]::FromHandle($handles[0])
+            $bmp   = $ficon.ToBitmap()
+            $ficon.Dispose()
+            [void][ShellIcon]::DestroyIcon($handles[0])
+            return $bmp
+        }
+    } catch { }
+    try {
+        $info = New-Object "ShellIcon+SHFILEINFO"
+        $FILE_ATTRIBUTE_DIRECTORY = 0x10
+        $SHGFI_ICON               = 0x100
+        $SHGFI_USEFILEATTRIBUTES  = 0x10
+        $SHGFI_LARGEICON          = 0x0
+        $flags = $SHGFI_ICON -bor $SHGFI_USEFILEATTRIBUTES -bor $SHGFI_LARGEICON
+        [void][ShellIcon]::SHGetFileInfo("folder", $FILE_ATTRIBUTE_DIRECTORY, [ref]$info, [System.Runtime.InteropServices.Marshal]::SizeOf($info), $flags)
+        if ($info.hIcon -ne [IntPtr]::Zero) {
+            $ficon = [System.Drawing.Icon]::FromHandle($info.hIcon)
+            $bmp   = $ficon.ToBitmap()
+            $ficon.Dispose()
+            [void][ShellIcon]::DestroyIcon($info.hIcon)
+            return $bmp
+        }
+    } catch { }
+    return $null
+}
+
+# Folder icon with a colored status badge in the top-right, at any size.
+# Badge geometry is proportional to the 32px original (14px dot, 2px halo, 2px inset).
+function New-FolderStatusBitmap([int]$size, [System.Drawing.Color]$dot) {
+    $bmp  = New-Object System.Drawing.Bitmap $size, $size
+    $g    = [System.Drawing.Graphics]::FromImage($bmp)
+    $g.SmoothingMode     = 'AntiAlias'
+    $g.InterpolationMode = 'HighQualityBicubic'
+    $g.Clear([System.Drawing.Color]::Transparent)
+
+    $folder = Get-FolderBitmap $size
+    if ($folder) {
+        $g.DrawImage($folder, 0, 0, $size, $size)
+        $folder.Dispose()
+    } else {
+        # Fallback: a simple drawn folder if no shell icon was available.
+        $body = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 222, 184, 100))
+        $g.FillRectangle($body, [int]($size * 3/32), [int]($size * 12/32), [int]($size * 26/32), [int]($size * 16/32))
+        $g.FillRectangle($body, [int]($size * 3/32), [int]($size *  8/32), [int]($size * 12/32), [int]($size *  6/32))
+        $body.Dispose()
+    }
+
+    # Status badge: white halo + colored dot, tucked into the top-right corner.
+    $bd     = [Math]::Max(5, [int][Math]::Round($size * 14 / 32))
+    $ringW  = [Math]::Max(1, [int][Math]::Round($size *  2 / 32))
+    $inset  = [Math]::Max(1, [int][Math]::Round($size *  2 / 32))
+    $outerD = $bd + 2 * $ringW
+    $cx     = $size - [int]($bd / 2) - $inset
+    $cy     = [int]($bd / 2) + $inset
+    [int]$ox = $cx - [int]($outerD / 2)
+    [int]$oy = $cy - [int]($outerD / 2)
+    [int]$ix = $cx - [int]($bd / 2)
+    [int]$iy = $cy - [int]($bd / 2)
+
+    $white = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+    $g.FillEllipse($white, $ox, $oy, $outerD, $outerD)
+    $brush = New-Object System.Drawing.SolidBrush $dot
+    $g.FillEllipse($brush, $ix, $iy, $bd, $bd)
+    $white.Dispose(); $brush.Dispose(); $g.Dispose()
+
+    return $bmp
+}
+
+function New-FolderStatusIcon([System.Drawing.Color]$dot) {
+    $bmp = New-FolderStatusBitmap 32 $dot
+    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+}
+
+# Writes bitmaps to a classic .ico file (32-bit BGRA entries with an AND mask
+# derived from alpha), which Explorer renders correctly at every size.
+function Write-IcoFile([string]$Path, [System.Drawing.Bitmap[]]$Bitmaps) {
+    $entries = @(foreach ($bmp in $Bitmaps) {
+        $w = $bmp.Width; $h = $bmp.Height
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $w, $h
+        $data = $bmp.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $stride = $data.Stride
+        $src = New-Object byte[] ($stride * $h)
+        [System.Runtime.InteropServices.Marshal]::Copy($data.Scan0, $src, 0, $src.Length)
+        $bmp.UnlockBits($data)
+
+        $rowBytes   = $w * 4
+        $maskStride = [int][Math]::Ceiling($w / 32) * 4
+        $xor = New-Object byte[] ($rowBytes * $h)      # BGRA, bottom-up
+        $and = New-Object byte[] ($maskStride * $h)    # 1bpp, bottom-up, 1 = transparent
+        for ($y = 0; $y -lt $h; $y++) {
+            $srcRow = $y * $stride
+            $dstY   = $h - 1 - $y
+            [Array]::Copy($src, $srcRow, $xor, $dstY * $rowBytes, $rowBytes)
+            for ($x = 0; $x -lt $w; $x++) {
+                if ($src[$srcRow + $x * 4 + 3] -eq 0) {
+                    $i = $dstY * $maskStride + ($x -shr 3)
+                    $and[$i] = $and[$i] -bor (0x80 -shr ($x -band 7))
+                }
+            }
+        }
+
+        $ms = New-Object System.IO.MemoryStream
+        $bw = New-Object System.IO.BinaryWriter $ms
+        # BITMAPINFOHEADER (height is doubled: XOR + AND masks)
+        $bw.Write([int32]40); $bw.Write([int32]$w); $bw.Write([int32]($h * 2))
+        $bw.Write([uint16]1); $bw.Write([uint16]32); $bw.Write([uint32]0)
+        $bw.Write([uint32]($xor.Length + $and.Length))
+        $bw.Write([int32]0); $bw.Write([int32]0); $bw.Write([uint32]0); $bw.Write([uint32]0)
+        $bw.Write($xor); $bw.Write($and)
+        $bw.Flush()
+        [pscustomobject]@{ W = $w; H = $h; Bytes = $ms.ToArray() }
+        $bw.Close()
+    })
+
+    $fs = [System.IO.File]::Create($Path)
+    $bw = New-Object System.IO.BinaryWriter $fs
+    try {
+        # ICONDIR
+        $bw.Write([uint16]0); $bw.Write([uint16]1); $bw.Write([uint16]$entries.Count)
+        $offset = 6 + 16 * $entries.Count
+        foreach ($e in $entries) {
+            # ICONDIRENTRY (0 means 256)
+            $bw.Write([byte]$(if ($e.W -ge 256) { 0 } else { $e.W }))
+            $bw.Write([byte]$(if ($e.H -ge 256) { 0 } else { $e.H }))
+            $bw.Write([byte]0); $bw.Write([byte]0)
+            $bw.Write([uint16]1); $bw.Write([uint16]32)
+            $bw.Write([uint32]$e.Bytes.Length); $bw.Write([uint32]$offset)
+            $offset += $e.Bytes.Length
+        }
+        foreach ($e in $entries) { $bw.Write($e.Bytes) }
+    } finally {
+        $bw.Close()
+    }
+}
+
+# --- Export mode: write the "running" icon and leave ---
+if ($ExportIcon) {
+    try {
+        $bitmaps = @(16, 32, 48, 256 | ForEach-Object { New-FolderStatusBitmap $_ $ColorUp })
+        Write-IcoFile -Path $ExportIcon -Bitmaps $bitmaps
+        $bitmaps | ForEach-Object { $_.Dispose() }
+        exit 0
+    } catch {
+        [Console]::Error.WriteLine("Couldn't write icon: $($_.Exception.Message)")
+        exit 1
+    }
+}
+# ==============================================================================
 
 # --- Single instance: if one is already running for this user, quietly exit. ---
 # Makes it safe to re-launch (e.g. from the Start-menu shortcut) if the icon ever
@@ -85,83 +283,8 @@ if (-not (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) 
     $startupWarnings += "Scheduled task '$TaskName' not found, so 'Start Syncthing' won't work."
 }
 
-# --- Get the real Windows folder icon from the shell, once ---
-Add-Type @"
-using System;
-using System.Runtime.InteropServices;
-public class ShellIcon {
-    [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Auto)]
-    public struct SHFILEINFO {
-        public IntPtr hIcon;
-        public int    iIcon;
-        public uint   dwAttributes;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=260)] public string szDisplayName;
-        [MarshalAs(UnmanagedType.ByValTStr, SizeConst=80)]  public string szTypeName;
-    }
-    [DllImport("shell32.dll", CharSet=CharSet.Auto)]
-    public static extern IntPtr SHGetFileInfo(string pszPath, uint dwFileAttributes, ref SHFILEINFO psfi, uint cbSizeFileInfo, uint uFlags);
-    [DllImport("user32.dll", SetLastError=true)]
-    public static extern bool DestroyIcon(IntPtr hIcon);
-}
-"@
-
-$script:FolderBitmap = $null
-try {
-    $info = New-Object "ShellIcon+SHFILEINFO"
-    $FILE_ATTRIBUTE_DIRECTORY = 0x10
-    $SHGFI_ICON               = 0x100
-    $SHGFI_USEFILEATTRIBUTES  = 0x10
-    $SHGFI_LARGEICON          = 0x0
-    $flags = $SHGFI_ICON -bor $SHGFI_USEFILEATTRIBUTES -bor $SHGFI_LARGEICON
-    [void][ShellIcon]::SHGetFileInfo("folder", $FILE_ATTRIBUTE_DIRECTORY, [ref]$info, [System.Runtime.InteropServices.Marshal]::SizeOf($info), $flags)
-    if ($info.hIcon -ne [IntPtr]::Zero) {
-        $ficon = [System.Drawing.Icon]::FromHandle($info.hIcon)
-        $script:FolderBitmap = $ficon.ToBitmap()
-        $ficon.Dispose()
-        [void][ShellIcon]::DestroyIcon($info.hIcon)
-    }
-} catch { }
-
-# --- Build a folder icon with a colored status badge in the top-right ---
-function New-FolderStatusIcon([System.Drawing.Color]$dot) {
-    $size = 32
-    $bmp  = New-Object System.Drawing.Bitmap $size, $size
-    $g    = [System.Drawing.Graphics]::FromImage($bmp)
-    $g.SmoothingMode     = 'AntiAlias'
-    $g.InterpolationMode = 'HighQualityBicubic'
-    $g.Clear([System.Drawing.Color]::Transparent)
-
-    if ($script:FolderBitmap) {
-        $g.DrawImage($script:FolderBitmap, 0, 0, $size, $size)
-    } else {
-        # Fallback: a simple drawn folder if the shell icon wasn't available.
-        $body = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(255, 222, 184, 100))
-        $g.FillRectangle($body, 3, 12, 26, 16)
-        $g.FillRectangle($body, 3, 8, 12, 6)
-        $body.Dispose()
-    }
-
-    # Status badge: white halo + colored dot, tucked into the top-right corner.
-    $bd     = 14
-    $ringW  = 2
-    $outerD = $bd + 2 * $ringW
-    $cx     = $size - [int]($bd / 2) - 2
-    $cy     = [int]($bd / 2) + 2
-    [int]$ox = $cx - [int]($outerD / 2)
-    [int]$oy = $cy - [int]($outerD / 2)
-    [int]$ix = $cx - [int]($bd / 2)
-    [int]$iy = $cy - [int]($bd / 2)
-
-    $white = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
-    $g.FillEllipse($white, $ox, $oy, $outerD, $outerD)
-    $brush = New-Object System.Drawing.SolidBrush $dot
-    $g.FillEllipse($brush, $ix, $iy, $bd, $bd)
-    $white.Dispose(); $brush.Dispose(); $g.Dispose()
-
-    return [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
-}
-$IconUp   = New-FolderStatusIcon ([System.Drawing.Color]::FromArgb(40, 170, 70))
-$IconDown = New-FolderStatusIcon ([System.Drawing.Color]::FromArgb(200, 60, 60))
+$IconUp   = New-FolderStatusIcon $ColorUp
+$IconDown = New-FolderStatusIcon $ColorDown
 
 $notify = New-Object System.Windows.Forms.NotifyIcon
 $notify.Icon    = $IconDown

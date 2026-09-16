@@ -1,4 +1,4 @@
-# Syncthing Simple Installer for Windows
+﻿# Syncthing Simple Installer for Windows
 
 A simple PowerShell script to install and configure [Syncthing](https://syncthing.net/) as a Scheduled Task on Windows, plus an optional tray icon that shows whether it's running.
 
@@ -40,7 +40,7 @@ The tray icon is meant for the person who uses the machine day to day, not the p
 * **Folder icon with a red badge:** Syncthing is not running. Right-click for **Start Syncthing**, which starts it via the scheduled task. A notification also pops up when Syncthing stops.
 * Hovering shows the current state as a tooltip.
 
-It starts automatically at logon. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut (a second copy won't be started if one is already running).
+It starts automatically at logon. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut (a second copy won't be started if one is already running). The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
 
 There is deliberately no Exit item. If you need to stop it, hold **Shift** while right-clicking the icon to reveal a hidden **Exit** entry.
 

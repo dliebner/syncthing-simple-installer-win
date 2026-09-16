@@ -41,6 +41,7 @@ $ErrorActionPreference = 'Stop'
 # ─────────────────────────────────────────────
 
 $ShortcutName  = "Syncthing Monitor.lnk"
+$IconFileName  = "SyncthingMonitor.ico"   # generated at install time by SyncthingTray.ps1 -ExportIcon
 $TrayFiles     = @("SyncthingTray.ps1", "launch-tray.vbs", "Install-SyncthingTray.ps1")
 $ShortcutDirs  = @(
     [Environment]::GetFolderPath('Startup'),    # auto-start at logon
@@ -147,7 +148,27 @@ if ($sameDir) {
 Unblock-File -Path ($TrayFiles | ForEach-Object { Join-Path $InstallDir $_ }) -ErrorAction SilentlyContinue
 
 # ─────────────────────────────────────────────
-# STEP 2: SHORTCUTS
+# STEP 2: SHORTCUT ICON
+# ─────────────────────────────────────────────
+
+# Ask the tray script to draw its own "running" icon (folder + green badge) as a
+# multi-size .ico, so the shortcuts look exactly like the tray. Runs in a child
+# process so its own settings/strict-mode don't leak into this one.
+Write-Step "Generating shortcut icon..."
+
+$iconPath     = Join-Path $InstallDir $IconFileName
+$iconLocation = "shell32.dll,3"    # plain folder, used only if generation fails
+& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File (Join-Path $InstallDir "SyncthingTray.ps1") -ExportIcon $iconPath
+if ($LASTEXITCODE -eq 0 -and (Test-Path $iconPath)) {
+    $iconLocation = "$iconPath,0"
+    Write-Success "Created $iconPath"
+} else {
+    Write-Host "    WARN: Couldn't generate the icon; shortcuts will use the plain folder icon." -ForegroundColor Yellow
+}
+
+# ─────────────────────────────────────────────
+# STEP 3: SHORTCUTS
 # ─────────────────────────────────────────────
 
 Write-Step "Creating 'Syncthing Monitor' shortcuts..."
@@ -160,14 +181,14 @@ foreach ($dir in $ShortcutDirs) {
     $sc.TargetPath       = "wscript.exe"          # runs the .vbs, which launches the tray hidden
     $sc.Arguments        = """$launcher"""
     $sc.WorkingDirectory = $InstallDir
-    $sc.IconLocation     = "shell32.dll,3"        # the folder icon, so it's recognizable
+    $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
     $sc.Description      = "Shows whether Syncthing is running, in the system tray."
     $sc.Save()
     Write-Success $lnk
 }
 
 # ─────────────────────────────────────────────
-# STEP 3: START (OR RESTART) IT NOW
+# STEP 4: START (OR RESTART) IT NOW
 # ─────────────────────────────────────────────
 
 Write-Step "Starting Syncthing Monitor..."
