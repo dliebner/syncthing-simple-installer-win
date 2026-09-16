@@ -19,7 +19,7 @@
     Install-Syncthing.ps1 runs this automatically. Run it by hand to add the tray
     icon to an existing install, or with -Uninstall to remove it again.
 
-    Allow-list antivirus (PC Matic and similar) will block the freshly compiled
+    Allow-list antivirus will block the freshly compiled
     exe until it is allowed once; this script waits for that and retries.
 
 .PARAMETER InstallDir
@@ -122,21 +122,6 @@ function Remove-Shortcuts {
     }
 }
 
-function Test-PCMatic {
-    # PC Matic / SuperShield is an allow-list ("default-deny") antivirus: it blocks
-    # any program it doesn't recognize, and a freshly compiled exe never is. Worse,
-    # it blocks unknown programs that are *launched by a script or a scheduled task*
-    # as a living-off-the-land defence, and logs the block against the launcher
-    # (powershell.exe / Task Scheduler), not against our exe - so no "allow this
-    # app?" prompt appears and there's nothing named after our exe to whitelist.
-    # Detected via its running processes/services so we can give exact guidance.
-    $pat = 'pcmatic|supershield|pcpitstop'
-    if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $pat }) { return $true }
-    if (Get-Service -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match $pat -or $_.DisplayName -match 'PC Matic|SuperShield|PCPitstop' }) { return $true }
-    return $false
-}
-
 function Invoke-WhitelistAssist {
     # Get an allow-list AV to let the exe through. The trick: a human double-click
     # from Explorer runs the exe with explorer.exe as its parent - a user-initiated
@@ -147,11 +132,7 @@ function Invoke-WhitelistAssist {
     param([string]$Path)
 
     Write-Host ""
-    if (Test-PCMatic) {
-        Write-Host "    PC Matic (SuperShield) is running and is blocking $ExeName." -ForegroundColor Yellow
-    } else {
-        Write-Host "    An allow-list antivirus is blocking $ExeName." -ForegroundColor Yellow
-    }
+    Write-Host "    An allow-list antivirus is blocking $ExeName." -ForegroundColor Yellow
     Write-Host "    A freshly compiled program is unknown to these products, and they block it" -ForegroundColor Yellow
     Write-Host "    hardest when a script or scheduled task launches it: the block is logged" -ForegroundColor Yellow
     Write-Host "    against the launcher (e.g. powershell.exe), not $ExeName, so no prompt appears." -ForegroundColor Yellow
@@ -343,7 +324,7 @@ function Write-TaskDiagnostics {
     $code = "0x{0:X}" -f $info.LastTaskResult
     $hint = switch ($info.LastTaskResult) {
         0          { "the process started and exited immediately (antivirus blocking it, or it failed at startup)" }
-        0x80070005 { "'Access is denied': Task Scheduler was refused when launching $ExeName, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
+        0x80070005 { "'Access is denied': Task Scheduler was refused when launching $ExeName, which is what allow-list antivirus looks like" }
         0x41301    { "Task Scheduler says it is still running, so the process may simply not have been found by name" }
         0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
         0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
