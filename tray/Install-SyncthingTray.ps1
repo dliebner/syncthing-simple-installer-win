@@ -4,8 +4,8 @@
     Installs (or removes) the "Syncthing Monitor" tray icon for the current user.
 
 .DESCRIPTION
-    - Copies SyncthingTray.ps1, launch-tray.vbs and this script into the Syncthing
-      install folder (next to syncthing.exe), so the shortcuts point somewhere stable
+    - Copies SyncthingTray.ps1 and this script into the Syncthing install folder
+      (next to syncthing.exe), so the shortcuts point somewhere stable
     - Adds "Syncthing Monitor" shortcuts to the Startup folder (auto-start at logon),
       the Start menu and the desktop (so it can be relaunched if the icon goes missing)
     - Starts the monitor now, restarting it if it is already running (upgrade case)
@@ -42,7 +42,13 @@ $ErrorActionPreference = 'Stop'
 
 $ShortcutName  = "Syncthing Monitor.lnk"
 $IconFileName  = "SyncthingMonitor.ico"   # generated at install time by SyncthingTray.ps1 -ExportIcon
-$TrayFiles     = @("SyncthingTray.ps1", "launch-tray.vbs", "Install-SyncthingTray.ps1")
+$TrayFiles     = @("SyncthingTray.ps1", "Install-SyncthingTray.ps1")
+
+# The tray is plain PowerShell launched hidden. No wscript/cscript in the chain:
+# allow-list antivirus products (PC Matic, for one) block Windows Script Host
+# by default, which silently breaks a .vbs launcher and the logon autostart.
+$PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$TrayArguments = "-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $InstallDir 'SyncthingTray.ps1')`""
 $ShortcutDirs  = @(
     [Environment]::GetFolderPath('Startup'),    # auto-start at logon
     [Environment]::GetFolderPath('Programs'),   # Start menu (searchable)
@@ -143,6 +149,9 @@ if ($sameDir) {
     Write-Success "Copied $($TrayFiles -join ', ')"
 }
 
+# Older versions used a .vbs launcher; tidy it up if it's still there.
+Remove-Item (Join-Path $InstallDir "launch-tray.vbs") -Force -ErrorAction SilentlyContinue
+
 # Clear the mark-of-the-web from files that came out of a downloaded ZIP, so
 # Windows doesn't show a security prompt when the shortcut runs at logon.
 Unblock-File -Path ($TrayFiles | ForEach-Object { Join-Path $InstallDir $_ }) -ErrorAction SilentlyContinue
@@ -173,14 +182,14 @@ if ($LASTEXITCODE -eq 0 -and (Test-Path $iconPath)) {
 
 Write-Step "Creating 'Syncthing Monitor' shortcuts..."
 
-$launcher = Join-Path $InstallDir "launch-tray.vbs"
 $ws = New-Object -ComObject WScript.Shell
 foreach ($dir in $ShortcutDirs) {
     $lnk = Join-Path $dir $ShortcutName
     $sc  = $ws.CreateShortcut($lnk)
-    $sc.TargetPath       = "$env:SystemRoot\System32\wscript.exe"   # absolute: some launch paths won't resolve a bare exe name
-    $sc.Arguments        = """$launcher"""
+    $sc.TargetPath       = $PowerShellExe
+    $sc.Arguments        = $TrayArguments
     $sc.WorkingDirectory = $InstallDir
+    $sc.WindowStyle      = 7                      # "Minimized": the console never shows before -WindowStyle Hidden kicks in
     $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
     $sc.Description      = "Shows whether Syncthing is running, in the system tray."
     $sc.Save()
@@ -198,7 +207,8 @@ Write-Step "Starting Syncthing Monitor..."
 if (Get-TrayProcess) { Stop-TrayMonitor }
 # -WorkingDirectory matters: the tray process would otherwise inherit this
 # script's current folder and keep it locked ("in use") until it exits.
-Start-Process "$env:SystemRoot\System32\wscript.exe" -ArgumentList """$launcher""" -WorkingDirectory $InstallDir
+# -WindowStyle Hidden here creates the console already hidden, so no flash.
+Start-Process $PowerShellExe -ArgumentList $TrayArguments -WorkingDirectory $InstallDir -WindowStyle Hidden
 Write-Success "Running now, and will start automatically at logon."
 
 Write-Host ""

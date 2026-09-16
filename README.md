@@ -1,4 +1,4 @@
-﻿# Syncthing Simple Installer for Windows
+# Syncthing Simple Installer for Windows
 
 A simple PowerShell script to install and configure [Syncthing](https://syncthing.net/) as a Scheduled Task on Windows, plus an optional tray icon that shows whether it's running.
 
@@ -20,7 +20,6 @@ Install-Syncthing.ps1          The installer. Run this.
 tray/
   Install-SyncthingTray.ps1    Installs just the tray icon (the main installer calls this for you)
   SyncthingTray.ps1            The tray icon itself
-  launch-tray.vbs              Starts the tray icon with no console window
 ```
 
 ## How to Use
@@ -43,6 +42,8 @@ The tray icon is meant for the person who uses the machine day to day, not the p
 It starts automatically at logon. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut (a second copy won't be started if one is already running). The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
 
 There is deliberately no Exit item. If you need to stop it, hold **Shift** while right-clicking the icon to reveal a hidden **Exit** entry.
+
+The shortcuts run `powershell.exe` hidden on `SyncthingTray.ps1` directly, with no `.vbs` or other script host in between. That matters on machines with allow-list antivirus such as PC Matic, which block `wscript.exe` by default and would otherwise stop the tray from starting at logon. If your antivirus still complains, the only thing to allow is `powershell.exe` running `SyncthingTray.ps1` from the Syncthing install folder.
 
 ### Managing the tray icon on its own
 
