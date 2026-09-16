@@ -221,33 +221,7 @@ if ($upToDate) {
 }
 
 # ─────────────────────────────────────────────
-# STEP 3: SHORTCUT ICON
-# ─────────────────────────────────────────────
-
-# The exe draws its own "running" icon (folder + green badge) as a multi-size
-# .ico, so the shortcuts look exactly like the tray. Written to a temp file first
-# so a failure can't clobber a good icon from a previous run.
-Write-Step "Generating shortcut icon..."
-
-$iconPath = Join-Path $InstallDir $IconFileName
-$iconTemp = "$iconPath.tmp"
-$export = Start-Process -FilePath $ExePath -ArgumentList "--export-icon", "`"$iconTemp`"" `
-    -WorkingDirectory $InstallDir -Wait -PassThru -ErrorAction SilentlyContinue
-if ($export -and $export.ExitCode -eq 0 -and (Test-Path $iconTemp)) {
-    Move-Item -Path $iconTemp -Destination $iconPath -Force
-    Write-Success "Created $iconPath"
-} else {
-    Remove-Item $iconTemp -Force -ErrorAction SilentlyContinue
-    if (Test-Path $iconPath) {
-        Write-Warn "Couldn't regenerate the icon; keeping the existing one."
-    } else {
-        Write-Warn "Couldn't generate the icon (antivirus blocking $ExeName?); shortcuts will use the plain folder icon."
-    }
-}
-$iconLocation = if (Test-Path $iconPath) { "$iconPath,0" } else { "shell32.dll,3" }
-
-# ─────────────────────────────────────────────
-# STEP 4: SCHEDULED TASK - START AT LOGON
+# STEP 3: SCHEDULED TASK - START AT LOGON
 # ─────────────────────────────────────────────
 
 Write-Step "Creating scheduled task: '$TaskName'..."
@@ -292,26 +266,7 @@ Register-ScheduledTask `
 Write-Success "Task created."
 
 # ─────────────────────────────────────────────
-# STEP 5: SHORTCUTS (relaunch by hand)
-# ─────────────────────────────────────────────
-
-Write-Step "Creating 'Syncthing Monitor' shortcuts..."
-
-Remove-Item $LegacyStartupLnk -Force -ErrorAction SilentlyContinue
-$ws = New-Object -ComObject WScript.Shell
-foreach ($dir in $ShortcutDirs) {
-    $lnk = Join-Path $dir $ShortcutName
-    $sc  = $ws.CreateShortcut($lnk)
-    $sc.TargetPath       = $ExePath
-    $sc.WorkingDirectory = $InstallDir
-    $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
-    $sc.Description      = "Shows whether Syncthing is running, in the system tray."
-    $sc.Save()
-    Write-Success $lnk
-}
-
-# ─────────────────────────────────────────────
-# STEP 6: START IT NOW
+# STEP 4: START IT NOW
 # ─────────────────────────────────────────────
 
 Write-Step "Starting Syncthing Monitor..."
@@ -351,7 +306,8 @@ while (-not $started) {
     Write-TaskDiagnostics
     Write-Host ""
     Write-Host "    If your antivirus just prompted about $ExeName, choose its 'always allow' option." -ForegroundColor Yellow
-    Write-Host "    If it blocked silently, open it and allow $ExePath" -ForegroundColor Yellow
+    Write-Host "    If nothing prompted, it is most likely blocking silently (a freshly built exe is" -ForegroundColor Yellow
+    Write-Host "    unknown to allow-list products); switch it to prompt mode and allow $ExePath" -ForegroundColor Yellow
     Write-Host "    (PC Matic: SuperShield > Blocking Notification Method > 'Prompt for Override'," -ForegroundColor Yellow
     Write-Host "    then retry here and click 'Always Allow')." -ForegroundColor Yellow
     Write-Host ""
@@ -364,6 +320,63 @@ while (-not $started) {
 }
 if ($started) {
     Write-Success "Running now, and will start automatically at logon."
+}
+
+# ─────────────────────────────────────────────
+# STEP 5: SHORTCUT ICON
+# ─────────────────────────────────────────────
+
+# The exe draws its own "running" icon (folder + green badge) as a multi-size
+# .ico, so the shortcuts look exactly like the tray. This runs after the first
+# launch above on purpose: by now any antivirus allow has been given. Written to
+# a temp file first so a failure can't clobber a good icon from a previous run.
+Write-Step "Generating shortcut icon..."
+
+$iconPath = Join-Path $InstallDir $IconFileName
+$iconTemp = "$iconPath.tmp"
+$exported = $false
+foreach ($attempt in 1..2) {
+    try {
+        $export = Start-Process -FilePath $ExePath -ArgumentList "--export-icon", "`"$iconTemp`"" `
+            -WorkingDirectory $InstallDir -Wait -PassThru
+        if ($export.ExitCode -eq 0 -and (Test-Path $iconTemp)) { $exported = $true; break }
+    } catch {
+        # Start-Process throws a terminating error when the launch itself is refused
+        # (e.g. "Access is denied" from antivirus); a moment later it may be allowed.
+        Write-Warn "Couldn't run $ExeName to draw the icon: $($_.Exception.Message)"
+    }
+    Start-Sleep -Seconds 1
+}
+if ($exported) {
+    Move-Item -Path $iconTemp -Destination $iconPath -Force
+    Write-Success "Created $iconPath"
+} else {
+    Remove-Item $iconTemp -Force -ErrorAction SilentlyContinue
+    if (Test-Path $iconPath) {
+        Write-Warn "Keeping the existing icon."
+    } else {
+        Write-Warn "Shortcuts will use the plain folder icon; re-run this script once $ExeName is allowed to run."
+    }
+}
+$iconLocation = if (Test-Path $iconPath) { "$iconPath,0" } else { "shell32.dll,3" }
+
+# ─────────────────────────────────────────────
+# STEP 6: SHORTCUTS (relaunch by hand)
+# ─────────────────────────────────────────────
+
+Write-Step "Creating 'Syncthing Monitor' shortcuts..."
+
+Remove-Item $LegacyStartupLnk -Force -ErrorAction SilentlyContinue
+$ws = New-Object -ComObject WScript.Shell
+foreach ($dir in $ShortcutDirs) {
+    $lnk = Join-Path $dir $ShortcutName
+    $sc  = $ws.CreateShortcut($lnk)
+    $sc.TargetPath       = $ExePath
+    $sc.WorkingDirectory = $InstallDir
+    $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
+    $sc.Description      = "Shows whether Syncthing is running, in the system tray."
+    $sc.Save()
+    Write-Success $lnk
 }
 
 Write-Host ""
