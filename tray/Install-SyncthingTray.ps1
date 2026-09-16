@@ -178,7 +178,7 @@ $ws = New-Object -ComObject WScript.Shell
 foreach ($dir in $ShortcutDirs) {
     $lnk = Join-Path $dir $ShortcutName
     $sc  = $ws.CreateShortcut($lnk)
-    $sc.TargetPath       = "wscript.exe"          # runs the .vbs, which launches the tray hidden
+    $sc.TargetPath       = "$env:SystemRoot\System32\wscript.exe"   # absolute: some launch paths won't resolve a bare exe name
     $sc.Arguments        = """$launcher"""
     $sc.WorkingDirectory = $InstallDir
     $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
@@ -198,7 +198,7 @@ Write-Step "Starting Syncthing Monitor..."
 if (Get-TrayProcess) { Stop-TrayMonitor }
 # -WorkingDirectory matters: the tray process would otherwise inherit this
 # script's current folder and keep it locked ("in use") until it exits.
-Start-Process "wscript.exe" -ArgumentList """$launcher""" -WorkingDirectory $InstallDir
+Start-Process "$env:SystemRoot\System32\wscript.exe" -ArgumentList """$launcher""" -WorkingDirectory $InstallDir
 Write-Success "Running now, and will start automatically at logon."
 
 Write-Host ""
