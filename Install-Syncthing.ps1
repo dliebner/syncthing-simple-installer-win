@@ -387,6 +387,8 @@ try {
     $trayExit.Dispose()
     Start-Sleep -Seconds 2
 } catch {}
+Get-Process -Name "SyncthingMonitor" | Stop-Process -Force
+# Older versions ran the tray as a PowerShell script.
 Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
     Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*\SyncthingTray.ps1*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
@@ -471,8 +473,10 @@ Write-Success "Syncthing is now running in the background."
 # STEP 9: TRAY ICON (optional)
 # ─────────────────────────────────────────────
 
-# The tray installer copies tray\* into $InstallDir, registers a logon task,
-# adds "Syncthing Monitor" shortcuts (Start menu, desktop) and starts it.
+# The tray installer copies tray\* into $InstallDir, compiles the tray icon
+# there (SyncthingMonitor.exe, using the compiler that ships with Windows),
+# registers a logon task, adds "Syncthing Monitor" shortcuts (Start menu,
+# desktop) and starts it.
 # A failure here is reported but doesn't undo the Syncthing install above.
 $trayStatus = "not installed (-NoTray)"
 if (-not $NoTray) {

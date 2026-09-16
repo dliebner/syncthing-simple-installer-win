@@ -4,19 +4,23 @@
     Installs (or removes) the "Syncthing Monitor" tray icon for the current user.
 
 .DESCRIPTION
-    - Copies SyncthingTray.ps1 and this script into the Syncthing install folder
-      (next to syncthing.exe), so nothing points at a Downloads folder
-    - Registers a scheduled task that starts the tray icon at logon, the same way
-      Install-Syncthing.ps1 starts Syncthing itself. No Startup-folder shortcut and
-      no .vbs launcher: allow-list antivirus (PC Matic, for one) blocks shortcuts
-      that launch script interpreters, which silently kills that kind of autostart.
-    - Adds "Syncthing Monitor" shortcuts to the Start menu and the desktop that
-      trigger the same task, so the icon can be relaunched if it ever goes missing
+    - Copies SyncthingMonitor.cs and this script into the Syncthing install folder
+      (next to syncthing.exe) and compiles the tray icon into SyncthingMonitor.exe
+      there, using the C# compiler that ships with Windows (.NET Framework 4.x).
+      No build tools, no binary in the repo, and the result is a real Windows
+      program: no interpreter, no execution-policy bypass, no console window.
+    - Registers a scheduled task that starts it at logon, the same way
+      Install-Syncthing.ps1 starts Syncthing itself
+    - Adds "Syncthing Monitor" shortcuts to the Start menu and the desktop, so the
+      icon can be relaunched if it ever goes missing
     - Starts the monitor now, restarting it if it is already running (upgrade case)
     - Does NOT touch Syncthing itself
 
     Install-Syncthing.ps1 runs this automatically. Run it by hand to add the tray
     icon to an existing install, or with -Uninstall to remove it again.
+
+    Allow-list antivirus (PC Matic and similar) will block the freshly compiled
+    exe until it is allowed once; this script waits for that and retries.
 
 .PARAMETER InstallDir
     Syncthing install folder the tray files are copied to.
@@ -46,8 +50,10 @@ $ErrorActionPreference = 'Stop'
 
 $TaskName      = "Syncthing Monitor ($env:USERNAME)"
 $ShortcutName  = "Syncthing Monitor.lnk"
-$IconFileName  = "SyncthingMonitor.ico"   # generated at install time by SyncthingTray.ps1 -ExportIcon
-$TrayFiles     = @("SyncthingTray.ps1", "Install-SyncthingTray.ps1")
+$SourceName    = "SyncthingMonitor.cs"
+$ExeName       = "SyncthingMonitor.exe"
+$IconFileName  = "SyncthingMonitor.ico"   # generated at install time by SyncthingMonitor.exe --export-icon
+$TrayFiles     = @($SourceName, "Install-SyncthingTray.ps1")
 $ShortcutDirs  = @(
     [Environment]::GetFolderPath('Programs'),   # Start menu (searchable)
     [Environment]::GetFolderPath('Desktop')
@@ -55,10 +61,10 @@ $ShortcutDirs  = @(
 # Older versions put an autostart shortcut here; it is removed on install/uninstall.
 $LegacyStartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) $ShortcutName
 
-$PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$TrayArguments = "-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $InstallDir 'SyncthingTray.ps1')`""
+$ExePath   = Join-Path $InstallDir $ExeName
+$StampPath = "$ExePath.source.sha256"   # hash of the source the exe was built from
 
-# Must match $ExitEventName in SyncthingTray.ps1.
+# Must match Config.ExitEventName in SyncthingMonitor.cs.
 $ExitEventName = "SyncthingTrayMonitor_Exit_$env:USERNAME"
 
 # ─────────────────────────────────────────────
@@ -81,10 +87,12 @@ function Write-Warn {
 }
 
 function Get-TrayProcess {
-    # The task runs: powershell.exe ... -File "<dir>\SyncthingTray.ps1". The leading
-    # backslash keeps this from matching Install-SyncthingTray.ps1 (i.e. ourselves).
-    Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
-        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like '*\SyncthingTray.ps1*' }
+    # The compiled tray, plus any instance of the old PowerShell-based tray
+    # (SyncthingTray.ps1) left over from earlier versions.
+    @(Get-Process -Name "SyncthingMonitor" -ErrorAction SilentlyContinue) +
+    @(Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+        Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like '*\SyncthingTray.ps1*' } |
+        ForEach-Object { Get-Process -Id $_.ProcessId -ErrorAction SilentlyContinue })
 }
 
 function Stop-TrayMonitor {
@@ -101,7 +109,8 @@ function Stop-TrayMonitor {
         if (-not (Get-TrayProcess)) { return }
         Start-Sleep -Milliseconds 250
     }
-    Get-TrayProcess | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    Get-TrayProcess | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+    Start-Sleep -Milliseconds 500   # let the exe's file handle go before we overwrite it
 }
 
 function Remove-Shortcuts {
@@ -169,27 +178,62 @@ if ($sameDir) {
     Write-Success "Copied $($TrayFiles -join ', ')"
 }
 
-# Older versions used a .vbs launcher; tidy it up if it's still there.
-Remove-Item (Join-Path $InstallDir "launch-tray.vbs") -Force -ErrorAction SilentlyContinue
+# Leftovers from earlier versions (PowerShell tray + .vbs launcher).
+foreach ($old in @("SyncthingTray.ps1", "launch-tray.vbs")) {
+    Remove-Item (Join-Path $InstallDir $old) -Force -ErrorAction SilentlyContinue
+}
 
 # Clear the mark-of-the-web from files that came out of a downloaded ZIP.
 Unblock-File -Path ($TrayFiles | ForEach-Object { Join-Path $InstallDir $_ }) -ErrorAction SilentlyContinue
 
 # ─────────────────────────────────────────────
-# STEP 2: SHORTCUT ICON
+# STEP 2: COMPILE THE TRAY ICON
 # ─────────────────────────────────────────────
 
-# Ask the tray script to draw its own "running" icon (folder + green badge) as a
-# multi-size .ico, so the shortcuts look exactly like the tray. Runs in a child
-# process so its own settings/strict-mode don't leak into this one. Written to a
-# temp file first so a failure can't clobber a good icon from a previous run.
+Write-Step "Building $ExeName..."
+
+# Only rebuild when the source changed. Every build produces a different file
+# hash, and allow-list antivirus keys its permission to that hash, so a pointless
+# rebuild would mean a pointless re-prompt.
+$srcPath = Join-Path $InstallDir $SourceName
+$srcHash = (Get-FileHash -Path $srcPath -Algorithm SHA256).Hash
+$upToDate = (Test-Path $ExePath) -and (Test-Path $StampPath) -and
+            ((Get-Content -Path $StampPath -Raw).Trim() -eq $srcHash)
+
+if ($upToDate) {
+    Write-Success "$ExeName is up to date with $SourceName, not rebuilding."
+} else {
+    # The exe can't be overwritten while it runs.
+    if (Get-TrayProcess) { Stop-TrayMonitor }
+    Remove-Item $StampPath -Force -ErrorAction SilentlyContinue
+
+    # Add-Type drives the .NET Framework C# compiler (csc.exe, present on every
+    # Windows 10/11). -OutputType WindowsApplication = a GUI exe with no console.
+    Add-Type -Path $srcPath `
+        -OutputAssembly $ExePath `
+        -OutputType WindowsApplication `
+        -ReferencedAssemblies System.Windows.Forms, System.Drawing, System.Xml `
+        -IgnoreWarnings
+
+    if (-not (Test-Path $ExePath)) { throw "The compiler produced no $ExeName." }
+    Set-Content -Path $StampPath -Value $srcHash -Encoding ASCII
+    Write-Success "Built $ExePath"
+}
+
+# ─────────────────────────────────────────────
+# STEP 3: SHORTCUT ICON
+# ─────────────────────────────────────────────
+
+# The exe draws its own "running" icon (folder + green badge) as a multi-size
+# .ico, so the shortcuts look exactly like the tray. Written to a temp file first
+# so a failure can't clobber a good icon from a previous run.
 Write-Step "Generating shortcut icon..."
 
 $iconPath = Join-Path $InstallDir $IconFileName
 $iconTemp = "$iconPath.tmp"
-& $PowerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-    -File (Join-Path $InstallDir "SyncthingTray.ps1") -ExportIcon $iconTemp
-if ($LASTEXITCODE -eq 0 -and (Test-Path $iconTemp)) {
+$export = Start-Process -FilePath $ExePath -ArgumentList "--export-icon", "`"$iconTemp`"" `
+    -WorkingDirectory $InstallDir -Wait -PassThru -ErrorAction SilentlyContinue
+if ($export -and $export.ExitCode -eq 0 -and (Test-Path $iconTemp)) {
     Move-Item -Path $iconTemp -Destination $iconPath -Force
     Write-Success "Created $iconPath"
 } else {
@@ -197,29 +241,26 @@ if ($LASTEXITCODE -eq 0 -and (Test-Path $iconTemp)) {
     if (Test-Path $iconPath) {
         Write-Warn "Couldn't regenerate the icon; keeping the existing one."
     } else {
-        Write-Warn "Couldn't generate the icon; shortcuts will use the plain folder icon."
+        Write-Warn "Couldn't generate the icon (antivirus blocking $ExeName?); shortcuts will use the plain folder icon."
     }
 }
 $iconLocation = if (Test-Path $iconPath) { "$iconPath,0" } else { "shell32.dll,3" }
 
 # ─────────────────────────────────────────────
-# STEP 3: SCHEDULED TASK - START AT LOGON
+# STEP 4: SCHEDULED TASK - START AT LOGON
 # ─────────────────────────────────────────────
 
 Write-Step "Creating scheduled task: '$TaskName'..."
 
 # Stop a running instance before replacing the task, so the restart below picks
-# up the new files (its single-instance guard would otherwise keep the old copy).
+# up the new build (its single-instance guard would otherwise keep the old copy).
 if (Get-TrayProcess) { Stop-TrayMonitor }
 
 if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
     Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
 }
 
-$action = New-ScheduledTaskAction `
-    -Execute $PowerShellExe `
-    -Argument $TrayArguments `
-    -WorkingDirectory $InstallDir
+$action = New-ScheduledTaskAction -Execute $ExePath -WorkingDirectory $InstallDir
 
 $currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
@@ -251,22 +292,18 @@ Register-ScheduledTask `
 Write-Success "Task created."
 
 # ─────────────────────────────────────────────
-# STEP 4: SHORTCUTS (relaunch by hand)
+# STEP 5: SHORTCUTS (relaunch by hand)
 # ─────────────────────────────────────────────
 
 Write-Step "Creating 'Syncthing Monitor' shortcuts..."
 
-# The shortcuts just poke the task, so the tray always starts the same way
-# (and Explorer never launches an interpreter directly).
 Remove-Item $LegacyStartupLnk -Force -ErrorAction SilentlyContinue
 $ws = New-Object -ComObject WScript.Shell
 foreach ($dir in $ShortcutDirs) {
     $lnk = Join-Path $dir $ShortcutName
     $sc  = $ws.CreateShortcut($lnk)
-    $sc.TargetPath       = "$env:SystemRoot\System32\schtasks.exe"
-    $sc.Arguments        = "/Run /TN `"$TaskName`""
+    $sc.TargetPath       = $ExePath
     $sc.WorkingDirectory = $InstallDir
-    $sc.WindowStyle      = 7                      # minimized: schtasks' console never lands on screen
     $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
     $sc.Description      = "Shows whether Syncthing is running, in the system tray."
     $sc.Save()
@@ -274,7 +311,7 @@ foreach ($dir in $ShortcutDirs) {
 }
 
 # ─────────────────────────────────────────────
-# STEP 5: START IT NOW
+# STEP 6: START IT NOW
 # ─────────────────────────────────────────────
 
 Write-Step "Starting Syncthing Monitor..."
@@ -292,15 +329,15 @@ function Start-TrayAndWait {
 
 function Write-TaskDiagnostics {
     # Report what Task Scheduler thinks happened, so a block can be told apart
-    # from a misconfigured task or a script that exited on its own.
+    # from a misconfigured task or a program that exited on its own.
     $info = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction SilentlyContinue
     $task = Get-ScheduledTask     -TaskName $TaskName -ErrorAction SilentlyContinue
     if (-not ($info -and $task)) { return }
     $code = "0x{0:X}" -f $info.LastTaskResult
     $hint = switch ($info.LastTaskResult) {
-        0          { "the process started and exited immediately (typical of antivirus blocking it, or the script failing at startup)" }
-        0x80070005 { "'Access is denied': Task Scheduler was refused when launching powershell.exe, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
-        0x41301    { "Task Scheduler says it is still running, so the tray process may simply not have been found by name" }
+        0          { "the process started and exited immediately (antivirus blocking it, or it failed at startup)" }
+        0x80070005 { "'Access is denied': Task Scheduler was refused when launching $ExeName, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
+        0x41301    { "Task Scheduler says it is still running, so the process may simply not have been found by name" }
         0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
         0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
         default    { "see Task Scheduler > Task Scheduler Library > '$TaskName' > History" }
@@ -310,13 +347,13 @@ function Write-TaskDiagnostics {
 
 $started = Start-TrayAndWait
 while (-not $started) {
-    Write-Warn "The task was triggered but no tray process appeared within 10s."
+    Write-Warn "The task was triggered but $ExeName did not stay running for 10s."
     Write-TaskDiagnostics
     Write-Host ""
-    Write-Host "    If your antivirus just prompted about powershell.exe, choose its 'always allow' option." -ForegroundColor Yellow
-    Write-Host "    If it blocked silently, open it and allow powershell.exe running SyncthingTray.ps1 from" -ForegroundColor Yellow
-    Write-Host "    $InstallDir (PC Matic: SuperShield > Blocking Notification Method >" -ForegroundColor Yellow
-    Write-Host "    'Prompt for Override', then retry here and click 'Always Allow')." -ForegroundColor Yellow
+    Write-Host "    If your antivirus just prompted about $ExeName, choose its 'always allow' option." -ForegroundColor Yellow
+    Write-Host "    If it blocked silently, open it and allow $ExePath" -ForegroundColor Yellow
+    Write-Host "    (PC Matic: SuperShield > Blocking Notification Method > 'Prompt for Override'," -ForegroundColor Yellow
+    Write-Host "    then retry here and click 'Always Allow')." -ForegroundColor Yellow
     Write-Host ""
     $answer = Read-Host "    Press Enter to try again, or type S to skip for now"
     if ($answer -match '^[sS]') {

@@ -19,7 +19,7 @@ I created this because I couldn't find another small, easily auditable script th
 Install-Syncthing.ps1          The installer. Run this.
 tray/
   Install-SyncthingTray.ps1    Installs just the tray icon (the main installer calls this for you)
-  SyncthingTray.ps1            The tray icon itself
+  SyncthingMonitor.cs          The tray icon itself; compiled on your machine at install time
 ```
 
 ## How to Use
@@ -39,23 +39,25 @@ The tray icon is meant for the person who uses the machine day to day, not the p
 * **Folder icon with a red badge:** Syncthing is not running. Right-click for **Start Syncthing**, which starts it via the scheduled task. A notification also pops up when Syncthing stops.
 * Hovering shows the current state as a tooltip.
 
-It starts automatically at logon through a scheduled task, `Syncthing Monitor (<username>)`, the same mechanism the installer uses for Syncthing itself. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut; those simply trigger the task, and a second copy won't be started if one is already running. The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
+It starts automatically at logon through a scheduled task, `Syncthing Monitor (<username>)`, the same mechanism the installer uses for Syncthing itself. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut; a second copy won't be started if one is already running. The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
 
 There is deliberately no Exit item. If you need to stop it, hold **Shift** while right-clicking the icon to reveal a hidden **Exit** entry.
 
-Why a scheduled task rather than a Startup-folder shortcut: some antivirus products block shortcuts that launch a script interpreter (`wscript.exe`, `powershell.exe`), which would silently stop the tray from starting at logon. Task Scheduler starting PowerShell is the same path Syncthing itself uses. On some machines a console window may flash for a fraction of a second when the task starts; that's PowerShell, not an error.
+### How it's built
 
-**Allow-list antivirus (PC Matic and similar):** these block `powershell.exe` whenever it isn't started from an interactive window, including by Task Scheduler, so the tray will not start until you allow it once. No installer can whitelist itself in such a product; that's the point of them. What the installer does instead is start the tray through the same task logon uses, report "Access is denied" when the launch is refused, and then wait for you to allow it and press Enter to retry, so one run is enough. For PC Matic, set SuperShield's *Blocking Notification Method* to *Prompt for Override (Advanced)* **before** installing: the prompt then appears during the install, and **Always Allow** on it is the permanent whitelist. Syncthing itself is unaffected.
+The tray icon is a small C# program, `tray\SyncthingMonitor.cs`. The installer compiles it on your machine into `SyncthingMonitor.exe` next to `syncthing.exe`, using the C# compiler that is part of the .NET Framework on every Windows 10 and 11. There is no binary in the repo to trust and no build tools to install; you can read the source, and what runs is exactly that. Being a real Windows program rather than a script, it needs no interpreter, no execution-policy bypass, and shows no console window. It's only rebuilt when the source changes.
+
+**Allow-list antivirus (PC Matic and similar):** a freshly compiled program is unknown to these products, so the first launch is blocked until you allow it once. That allow is scoped to this one small exe, not to PowerShell or anything else. No installer can whitelist itself in such a product; that's the point of them. What the installer does instead is start the tray through the same task logon uses, report "Access is denied" when the launch is refused, and then wait for you to allow it and press Enter to retry, so one run is enough. For PC Matic, set SuperShield's *Blocking Notification Method* to *Prompt for Override (Advanced)* **before** installing: the prompt then appears during the install, and **Always Allow** on it is the permanent whitelist. Syncthing itself is unaffected.
 
 ### Managing the tray icon on its own
 
 The main installer installs the tray icon by default. To control it separately:
 
 * **Skip it during install:** run `Install-Syncthing.ps1 -NoTray` from a terminal.
-* **Add it to an existing install:** run `tray\Install-SyncthingTray.ps1`. It copies the tray files into `%LOCALAPPDATA%\Programs\Syncthing` (next to `syncthing.exe`), creates the shortcuts and starts it. Re-running it upgrades a running copy in place.
+* **Add it to an existing install:** run `tray\Install-SyncthingTray.ps1`. It copies the tray files into `%LOCALAPPDATA%\Programs\Syncthing` (next to `syncthing.exe`), builds the exe, creates the task and shortcuts and starts it. Re-running it upgrades a running copy in place.
 * **Remove just the tray icon:** run `Install-SyncthingTray.ps1 -Uninstall` (from `tray\` or from the install folder). It stops the tray and removes the task and shortcuts. `Uninstall-Syncthing.ps1` also removes it along with everything else.
 
-Under the hood it polls Syncthing's local REST API every 15 seconds using `curl.exe` and reads the address and API key from `config.xml`. A few settings (poll interval, notifications, the hidden Exit item) are variables at the top of `tray\SyncthingTray.ps1`.
+Under the hood it polls Syncthing's local REST API every 15 seconds and reads the address and API key from `config.xml`. A few settings (poll interval, notifications, the hidden Exit item) are constants at the top of `tray\SyncthingMonitor.cs`.
 
 ## Advanced Configuration
 
