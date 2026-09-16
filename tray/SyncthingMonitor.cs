@@ -1,4 +1,4 @@
-// SyncthingMonitor.cs
+﻿// SyncthingMonitor.cs
 // Minimal system-tray indicator for Syncthing ("Syncthing Monitor").
 //   Windows folder icon + GREEN badge = Syncthing is running and answering.
 //   Windows folder icon + RED badge   = Syncthing is not running / not answering.
@@ -23,6 +23,7 @@
 // old-fashioned: no string interpolation, no ?. operator, no expression bodies.
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -132,7 +133,7 @@ namespace SyncthingMonitor
         // Talks to Syncthing over its local API. Self-signed certs (GUI TLS on) are
         // accepted, same as "curl -k".
         string baseUrl = "http://127.0.0.1:8384";
-        string fallbackUrl = "";   // loopback form of baseUrl to try if that doesn't answer
+        string[] fallbackUrls = new string[0];   // other forms of baseUrl to try if that doesn't answer
         string apiKey  = "";
 
         NotifyIcon notify;
@@ -235,13 +236,14 @@ namespace SyncthingMonitor
             }
             baseUrl = scheme + "://" + address;
 
-            // A second URL to try when the configured one doesn't answer. The GUI
-            // address is a *listen* address: "0.0.0.0:8384" (all interfaces, the usual
-            // setting for LAN access) or "[::]:8384" can't be *connected* to on Windows,
-            // and "localhost" may resolve to ::1 first. A browser gets away with that;
-            // HttpWebRequest doesn't. Loopback on the same port is what they all mean
-            // for a check from this machine.
-            fallbackUrl = "";
+            // Other URLs to try when the configured one doesn't answer:
+            // - Loopback on the same port. The GUI address is a *listen* address:
+            //   "0.0.0.0:8384" (all interfaces, the usual setting for LAN access) or
+            //   "[::]:8384" can't be *connected* to on Windows, and "localhost" may
+            //   resolve to ::1 first. A browser gets away with that; HttpWebRequest
+            //   doesn't. Loopback is what they all mean for a check from this machine.
+            // - The other scheme. config.xml is only read at startup, so a TLS toggle
+            //   in the GUI would otherwise read as "down" until the tray is restarted.
             string host = address, port = "8384";
             int colon = address.LastIndexOf(':');
             if (colon >= 0 && address.IndexOf(']') < colon)
@@ -250,9 +252,14 @@ namespace SyncthingMonitor
                 port = address.Substring(colon + 1);
             }
             host = host.Trim('[', ']').Trim();
-            if (port.Trim().Length == 0) port = "8384";
-            if (host != "127.0.0.1")
-                fallbackUrl = scheme + "://127.0.0.1:" + port.Trim();
+            port = port.Trim();
+            if (port.Length == 0) port = "8384";
+            string other = (scheme == "https") ? "http" : "https";
+            List<string> alts = new List<string>();
+            if (host != "127.0.0.1") alts.Add(scheme + "://127.0.0.1:" + port);
+            alts.Add(other + "://" + address);
+            if (host != "127.0.0.1") alts.Add(other + "://127.0.0.1:" + port);
+            fallbackUrls = alts.ToArray();
         }
 
         // All API calls go through here. No system proxy: a configured proxy or VPN
@@ -285,12 +292,14 @@ namespace SyncthingMonitor
         bool TestUp()
         {
             if (Probe(baseUrl)) return true;
-            if (fallbackUrl.Length > 0 && Probe(fallbackUrl))
+            for (int i = 0; i < fallbackUrls.Length; i++)
             {
-                // The loopback form is the one that answers; use it from now on
-                // (for Sync Now as well).
-                baseUrl = fallbackUrl;
-                fallbackUrl = "";
+                if (!Probe(fallbackUrls[i])) continue;
+                // That one answers: use it from now on (for Sync Now as well), and
+                // keep the old one as a fallback in case things change back.
+                string old = baseUrl;
+                baseUrl = fallbackUrls[i];
+                fallbackUrls[i] = old;
                 return true;
             }
             return false;
