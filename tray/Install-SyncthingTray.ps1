@@ -5,9 +5,13 @@
 
 .DESCRIPTION
     - Copies SyncthingTray.ps1 and this script into the Syncthing install folder
-      (next to syncthing.exe), so the shortcuts point somewhere stable
-    - Adds "Syncthing Monitor" shortcuts to the Startup folder (auto-start at logon),
-      the Start menu and the desktop (so it can be relaunched if the icon goes missing)
+      (next to syncthing.exe), so nothing points at a Downloads folder
+    - Registers a scheduled task that starts the tray icon at logon, the same way
+      Install-Syncthing.ps1 starts Syncthing itself. No Startup-folder shortcut and
+      no .vbs launcher: allow-list antivirus (PC Matic, for one) blocks shortcuts
+      that launch script interpreters, which silently kills that kind of autostart.
+    - Adds "Syncthing Monitor" shortcuts to the Start menu and the desktop that
+      trigger the same task, so the icon can be relaunched if it ever goes missing
     - Starts the monitor now, restarting it if it is already running (upgrade case)
     - Does NOT touch Syncthing itself
 
@@ -19,7 +23,7 @@
     Defaults to %LOCALAPPDATA%\Programs\Syncthing (same as Install-Syncthing.ps1).
 
 .PARAMETER Uninstall
-    Stop the monitor and remove its shortcuts instead of installing.
+    Stop the monitor, remove its scheduled task and shortcuts instead of installing.
     The tray files in InstallDir are left in place so it can be reinstalled later.
 
 .PARAMETER NoPause
@@ -40,20 +44,20 @@ $ErrorActionPreference = 'Stop'
 # CONFIGURATION
 # ─────────────────────────────────────────────
 
+$TaskName      = "Syncthing Monitor ($env:USERNAME)"
 $ShortcutName  = "Syncthing Monitor.lnk"
 $IconFileName  = "SyncthingMonitor.ico"   # generated at install time by SyncthingTray.ps1 -ExportIcon
 $TrayFiles     = @("SyncthingTray.ps1", "Install-SyncthingTray.ps1")
-
-# The tray is plain PowerShell launched hidden. No wscript/cscript in the chain:
-# allow-list antivirus products (PC Matic, for one) block Windows Script Host
-# by default, which silently breaks a .vbs launcher and the logon autostart.
-$PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
-$TrayArguments = "-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $InstallDir 'SyncthingTray.ps1')`""
 $ShortcutDirs  = @(
-    [Environment]::GetFolderPath('Startup'),    # auto-start at logon
     [Environment]::GetFolderPath('Programs'),   # Start menu (searchable)
     [Environment]::GetFolderPath('Desktop')
 )
+# Older versions put an autostart shortcut here; it is removed on install/uninstall.
+$LegacyStartupLnk = Join-Path ([Environment]::GetFolderPath('Startup')) $ShortcutName
+
+$PowerShellExe = "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe"
+$TrayArguments = "-NoProfile -NonInteractive -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$(Join-Path $InstallDir 'SyncthingTray.ps1')`""
+
 # Must match $ExitEventName in SyncthingTray.ps1.
 $ExitEventName = "SyncthingTrayMonitor_Exit_$env:USERNAME"
 
@@ -71,8 +75,13 @@ function Write-Success {
     Write-Host "    OK: $Message" -ForegroundColor Green
 }
 
+function Write-Warn {
+    param([string]$Message)
+    Write-Host "    WARN: $Message" -ForegroundColor Yellow
+}
+
 function Get-TrayProcess {
-    # The launcher runs: powershell.exe ... -File "<dir>\SyncthingTray.ps1". The leading
+    # The task runs: powershell.exe ... -File "<dir>\SyncthingTray.ps1". The leading
     # backslash keeps this from matching Install-SyncthingTray.ps1 (i.e. ourselves).
     Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
         Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -and $_.CommandLine -like '*\SyncthingTray.ps1*' }
@@ -95,6 +104,15 @@ function Stop-TrayMonitor {
     Get-TrayProcess | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 }
 
+function Remove-Shortcuts {
+    foreach ($lnk in (@($ShortcutDirs | ForEach-Object { Join-Path $_ $ShortcutName }) + $LegacyStartupLnk)) {
+        if (Test-Path $lnk) {
+            Remove-Item $lnk -Force
+            Write-Success "Removed $lnk"
+        }
+    }
+}
+
 try {
 
 # ─────────────────────────────────────────────
@@ -106,14 +124,16 @@ if ($Uninstall) {
     Stop-TrayMonitor
     Write-Success "Stopped."
 
-    Write-Step "Removing shortcuts..."
-    foreach ($dir in $ShortcutDirs) {
-        $lnk = Join-Path $dir $ShortcutName
-        if (Test-Path $lnk) {
-            Remove-Item $lnk -Force
-            Write-Success "Removed $lnk"
-        }
+    Write-Step "Removing scheduled task '$TaskName'..."
+    if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+        Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+        Write-Success "Removed."
+    } else {
+        Write-Success "Not present."
     }
+
+    Write-Step "Removing shortcuts..."
+    Remove-Shortcuts
 
     Write-Host ""
     Write-Host "Syncthing Monitor removed. It will no longer start at logon." -ForegroundColor Green
@@ -152,8 +172,7 @@ if ($sameDir) {
 # Older versions used a .vbs launcher; tidy it up if it's still there.
 Remove-Item (Join-Path $InstallDir "launch-tray.vbs") -Force -ErrorAction SilentlyContinue
 
-# Clear the mark-of-the-web from files that came out of a downloaded ZIP, so
-# Windows doesn't show a security prompt when the shortcut runs at logon.
+# Clear the mark-of-the-web from files that came out of a downloaded ZIP.
 Unblock-File -Path ($TrayFiles | ForEach-Object { Join-Path $InstallDir $_ }) -ErrorAction SilentlyContinue
 
 # ─────────────────────────────────────────────
@@ -162,34 +181,92 @@ Unblock-File -Path ($TrayFiles | ForEach-Object { Join-Path $InstallDir $_ }) -E
 
 # Ask the tray script to draw its own "running" icon (folder + green badge) as a
 # multi-size .ico, so the shortcuts look exactly like the tray. Runs in a child
-# process so its own settings/strict-mode don't leak into this one.
+# process so its own settings/strict-mode don't leak into this one. Written to a
+# temp file first so a failure can't clobber a good icon from a previous run.
 Write-Step "Generating shortcut icon..."
 
-$iconPath     = Join-Path $InstallDir $IconFileName
-$iconLocation = "shell32.dll,3"    # plain folder, used only if generation fails
-& powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
-    -File (Join-Path $InstallDir "SyncthingTray.ps1") -ExportIcon $iconPath
-if ($LASTEXITCODE -eq 0 -and (Test-Path $iconPath)) {
-    $iconLocation = "$iconPath,0"
+$iconPath = Join-Path $InstallDir $IconFileName
+$iconTemp = "$iconPath.tmp"
+& $PowerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass `
+    -File (Join-Path $InstallDir "SyncthingTray.ps1") -ExportIcon $iconTemp
+if ($LASTEXITCODE -eq 0 -and (Test-Path $iconTemp)) {
+    Move-Item -Path $iconTemp -Destination $iconPath -Force
     Write-Success "Created $iconPath"
 } else {
-    Write-Host "    WARN: Couldn't generate the icon; shortcuts will use the plain folder icon." -ForegroundColor Yellow
+    Remove-Item $iconTemp -Force -ErrorAction SilentlyContinue
+    if (Test-Path $iconPath) {
+        Write-Warn "Couldn't regenerate the icon; keeping the existing one."
+    } else {
+        Write-Warn "Couldn't generate the icon; shortcuts will use the plain folder icon."
+    }
 }
+$iconLocation = if (Test-Path $iconPath) { "$iconPath,0" } else { "shell32.dll,3" }
 
 # ─────────────────────────────────────────────
-# STEP 3: SHORTCUTS
+# STEP 3: SCHEDULED TASK - START AT LOGON
+# ─────────────────────────────────────────────
+
+Write-Step "Creating scheduled task: '$TaskName'..."
+
+# Stop a running instance before replacing the task, so the restart below picks
+# up the new files (its single-instance guard would otherwise keep the old copy).
+if (Get-TrayProcess) { Stop-TrayMonitor }
+
+if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
+    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
+}
+
+$action = New-ScheduledTaskAction `
+    -Execute $PowerShellExe `
+    -Argument $TrayArguments `
+    -WorkingDirectory $InstallDir
+
+$currentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User $currentUser
+
+$settings = New-ScheduledTaskSettingsSet `
+    -Hidden `
+    -RestartCount 3 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -DontStopIfGoingOnBatteries `
+    -AllowStartIfOnBatteries `
+    -MultipleInstances IgnoreNew
+
+$settings.ExecutionTimeLimit = "PT0S"           # no time limit: the tray runs for the whole session
+$settings.IdleSettings.StopOnIdleEnd = $false
+
+$principal = New-ScheduledTaskPrincipal `
+    -UserId $currentUser `
+    -LogonType Interactive `
+    -RunLevel Limited
+
+Register-ScheduledTask `
+    -TaskName $TaskName `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -Principal $principal `
+    -Description "Shows whether Syncthing is running, in the system tray." | Out-Null
+
+Write-Success "Task created."
+
+# ─────────────────────────────────────────────
+# STEP 4: SHORTCUTS (relaunch by hand)
 # ─────────────────────────────────────────────
 
 Write-Step "Creating 'Syncthing Monitor' shortcuts..."
 
+# The shortcuts just poke the task, so the tray always starts the same way
+# (and Explorer never launches an interpreter directly).
+Remove-Item $LegacyStartupLnk -Force -ErrorAction SilentlyContinue
 $ws = New-Object -ComObject WScript.Shell
 foreach ($dir in $ShortcutDirs) {
     $lnk = Join-Path $dir $ShortcutName
     $sc  = $ws.CreateShortcut($lnk)
-    $sc.TargetPath       = $PowerShellExe
-    $sc.Arguments        = $TrayArguments
+    $sc.TargetPath       = "$env:SystemRoot\System32\schtasks.exe"
+    $sc.Arguments        = "/Run /TN `"$TaskName`""
     $sc.WorkingDirectory = $InstallDir
-    $sc.WindowStyle      = 7                      # "Minimized": the console never shows before -WindowStyle Hidden kicks in
+    $sc.WindowStyle      = 7                      # minimized: schtasks' console never lands on screen
     $sc.IconLocation     = $iconLocation          # same folder-with-badge icon as the tray
     $sc.Description      = "Shows whether Syncthing is running, in the system tray."
     $sc.Save()
@@ -197,23 +274,25 @@ foreach ($dir in $ShortcutDirs) {
 }
 
 # ─────────────────────────────────────────────
-# STEP 4: START (OR RESTART) IT NOW
+# STEP 5: START IT NOW
 # ─────────────────────────────────────────────
 
 Write-Step "Starting Syncthing Monitor..."
 
-# Stop any running instance first: its single-instance guard would otherwise
-# keep the old copy running (matters when re-running this to upgrade).
-if (Get-TrayProcess) { Stop-TrayMonitor }
-# -WorkingDirectory matters: the tray process would otherwise inherit this
-# script's current folder and keep it locked ("in use") until it exits.
-# -WindowStyle Hidden here creates the console already hidden, so no flash.
-Start-Process $PowerShellExe -ArgumentList $TrayArguments -WorkingDirectory $InstallDir -WindowStyle Hidden
-Write-Success "Running now, and will start automatically at logon."
+# Through the task, so this exercises exactly the path used at logon.
+Start-ScheduledTask -TaskName $TaskName
+$deadline = (Get-Date).AddSeconds(10)
+while (-not (Get-TrayProcess) -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 250 }
+if (Get-TrayProcess) {
+    Write-Success "Running now, and will start automatically at logon."
+} else {
+    Write-Warn "The task was triggered but no tray process appeared within 10s."
+    Write-Warn "If antivirus is blocking it, allow powershell.exe running SyncthingTray.ps1 from $InstallDir."
+}
 
 Write-Host ""
 Write-Host "If the tray icon ever disappears, reopen 'Syncthing Monitor' from the Start menu or desktop."
-Write-Host "To remove it later: run this script with -Uninstall (or delete the three shortcuts above)."
+Write-Host "To remove it later: run this script with -Uninstall."
 
 } catch {
 

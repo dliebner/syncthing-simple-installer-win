@@ -39,11 +39,11 @@ The tray icon is meant for the person who uses the machine day to day, not the p
 * **Folder icon with a red badge:** Syncthing is not running. Right-click for **Start Syncthing**, which starts it via the scheduled task. A notification also pops up when Syncthing stops.
 * Hovering shows the current state as a tooltip.
 
-It starts automatically at logon. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut (a second copy won't be started if one is already running). The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
+It starts automatically at logon through a scheduled task, `Syncthing Monitor (<username>)`, the same mechanism the installer uses for Syncthing itself. If the icon ever goes missing, reopen **Syncthing Monitor** from the Start menu or the desktop shortcut; those simply trigger the task, and a second copy won't be started if one is already running. The shortcuts use the same folder-with-green-badge icon as the tray; it's generated at install time into `SyncthingMonitor.ico` next to `syncthing.exe`.
 
 There is deliberately no Exit item. If you need to stop it, hold **Shift** while right-clicking the icon to reveal a hidden **Exit** entry.
 
-The shortcuts run `powershell.exe` hidden on `SyncthingTray.ps1` directly, with no `.vbs` or other script host in between. That matters on machines with allow-list antivirus such as PC Matic, which block `wscript.exe` by default and would otherwise stop the tray from starting at logon. If your antivirus still complains, the only thing to allow is `powershell.exe` running `SyncthingTray.ps1` from the Syncthing install folder.
+Why a scheduled task rather than a Startup-folder shortcut: allow-list antivirus products such as PC Matic block shortcuts that launch a script interpreter (`wscript.exe`, `powershell.exe`), which would silently stop the tray from starting at logon. Task Scheduler starting PowerShell is the same path Syncthing itself uses. If your antivirus still objects, the one thing to allow is `powershell.exe` running `SyncthingTray.ps1` from the Syncthing install folder. On some machines a console window may flash for a fraction of a second when the task starts; that's PowerShell, not an error.
 
 ### Managing the tray icon on its own
 
@@ -51,7 +51,7 @@ The main installer installs the tray icon by default. To control it separately:
 
 * **Skip it during install:** run `Install-Syncthing.ps1 -NoTray` from a terminal.
 * **Add it to an existing install:** run `tray\Install-SyncthingTray.ps1`. It copies the tray files into `%LOCALAPPDATA%\Programs\Syncthing` (next to `syncthing.exe`), creates the shortcuts and starts it. Re-running it upgrades a running copy in place.
-* **Remove just the tray icon:** run `Install-SyncthingTray.ps1 -Uninstall` (from `tray\` or from the install folder). `Uninstall-Syncthing.ps1` also removes it along with everything else.
+* **Remove just the tray icon:** run `Install-SyncthingTray.ps1 -Uninstall` (from `tray\` or from the install folder). It stops the tray and removes the task and shortcuts. `Uninstall-Syncthing.ps1` also removes it along with everything else.
 
 Under the hood it polls Syncthing's local REST API every 15 seconds using `curl.exe` and reads the address and API key from `config.xml`. A few settings (poll interval, notifications, the hidden Exit item) are variables at the top of `tray\SyncthingTray.ps1`.
 

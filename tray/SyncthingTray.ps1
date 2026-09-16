@@ -8,9 +8,10 @@
 # No window. No Exit item for the end user. (Optional hidden Shift+Exit, below.)
 #
 # Install-Syncthing.ps1 (or tray\Install-SyncthingTray.ps1) copies this file
-# next to syncthing.exe and creates "Syncthing Monitor" shortcuts that run it
-# with powershell.exe -WindowStyle Hidden (no script host involved, so it works
-# under allow-list antivirus that blocks wscript.exe).
+# next to syncthing.exe and registers a logon scheduled task that runs it with
+# powershell.exe -WindowStyle Hidden. The "Syncthing Monitor" shortcuts just
+# trigger that task (Explorer never launches an interpreter directly, which
+# allow-list antivirus such as PC Matic blocks).
 #
 # Talks to Syncthing over its local API with curl.exe -k, so a self-signed
 # HTTPS cert (if GUI TLS is enabled) is a non-issue.

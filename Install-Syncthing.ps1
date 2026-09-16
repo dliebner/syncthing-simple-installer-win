@@ -390,6 +390,7 @@ try {
 Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
     Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*\SyncthingTray.ps1*' } |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Unregister-ScheduledTask -TaskName "Syncthing Monitor ($env:USERNAME)" -Confirm:$false
 
 Write-Host "Removing Syncthing Monitor shortcuts..." -ForegroundColor Cyan
 foreach ($dir in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) {
@@ -446,7 +447,8 @@ MANUAL METHOD:
 2. Open Task Scheduler and delete the task: '$TaskNameStart'
 3. Open Windows Defender Firewall and delete the inbound rule: '$FirewallRuleName'
 4. If the Syncthing Monitor tray icon is installed: hold Shift, right-click it and choose Exit,
-   then delete 'Syncthing Monitor.lnk' from the Startup folder, the Start menu and the desktop.
+   delete the task 'Syncthing Monitor ($env:USERNAME)' in Task Scheduler, and delete
+   'Syncthing Monitor.lnk' from the Start menu and the desktop.
 5. Delete this program folder: $InstallDir
 
 OPTIONAL (To clear all your synced folder configurations and database):
@@ -469,16 +471,16 @@ Write-Success "Syncthing is now running in the background."
 # STEP 9: TRAY ICON (optional)
 # ─────────────────────────────────────────────
 
-# The tray installer copies tray\* into $InstallDir, adds "Syncthing Monitor"
-# shortcuts (Startup, Start menu, desktop) and starts it. A failure here is
-# reported but doesn't undo the Syncthing install above.
+# The tray installer copies tray\* into $InstallDir, registers a logon task,
+# adds "Syncthing Monitor" shortcuts (Start menu, desktop) and starts it.
+# A failure here is reported but doesn't undo the Syncthing install above.
 $trayStatus = "not installed (-NoTray)"
 if (-not $NoTray) {
     Write-Step "Installing Syncthing Monitor tray icon..."
     if (Test-Path $TrayInstaller) {
         try {
             & $TrayInstaller -InstallDir $InstallDir -NoPause
-            $trayStatus = "installed (Startup folder, Start menu and desktop shortcuts)"
+            $trayStatus = "installed (logon task 'Syncthing Monitor ($env:USERNAME)', Start menu and desktop shortcuts)"
         } catch {
             Write-Warn "Tray icon install failed: $($_.Exception.Message)"
             $trayStatus = "FAILED - run tray\Install-SyncthingTray.ps1 by hand"
