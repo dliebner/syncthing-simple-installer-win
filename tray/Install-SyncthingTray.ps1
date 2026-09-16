@@ -122,6 +122,58 @@ function Remove-Shortcuts {
     }
 }
 
+function Test-PCMatic {
+    # PC Matic / SuperShield is an allow-list ("default-deny") antivirus: it blocks
+    # any program it doesn't recognize, and a freshly compiled exe never is. Worse,
+    # it blocks unknown programs that are *launched by a script or a scheduled task*
+    # as a living-off-the-land defence, and logs the block against the launcher
+    # (powershell.exe / Task Scheduler), not against our exe - so no "allow this
+    # app?" prompt appears and there's nothing named after our exe to whitelist.
+    # Detected via its running processes/services so we can give exact guidance.
+    $pat = 'pcmatic|supershield|pcpitstop'
+    if (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $pat }) { return $true }
+    if (Get-Service -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match $pat -or $_.DisplayName -match 'PC Matic|SuperShield|PCPitstop' }) { return $true }
+    return $false
+}
+
+function Invoke-WhitelistAssist {
+    # Get an allow-list AV to let the exe through. The trick: a human double-click
+    # from Explorer runs the exe with explorer.exe as its parent - a user-initiated
+    # launch - which is the one path such products treat as "the user meant to run
+    # this" and either allow or offer to allow. It also finally logs the block
+    # against the exe itself, so it shows up in the AV's list as something to
+    # whitelist. Either way, allowing it once is scoped to this one small exe.
+    param([string]$Path)
+
+    Write-Host ""
+    if (Test-PCMatic) {
+        Write-Host "    PC Matic (SuperShield) is running and is blocking $ExeName." -ForegroundColor Yellow
+        Write-Host "    It blocks unknown programs that are started by a script or a scheduled task," -ForegroundColor Yellow
+        Write-Host "    which is why only powershell.exe shows in its blocked list, not $ExeName," -ForegroundColor Yellow
+        Write-Host "    and why no allow prompt appeared. Starting it once by hand fixes that:" -ForegroundColor Yellow
+    } else {
+        Write-Host "    An allow-list antivirus is blocking $ExeName (a freshly compiled program is" -ForegroundColor Yellow
+        Write-Host "    unknown to these products). Starting it once by hand lets you allow it:" -ForegroundColor Yellow
+    }
+    Write-Host ""
+    Write-Host "      1. An Explorer window will open with $ExeName selected." -ForegroundColor Yellow
+    Write-Host "      2. Double-click $ExeName." -ForegroundColor Yellow
+    Write-Host "      3. When your antivirus notifies or blocks it, choose Allow / Always Allow." -ForegroundColor Yellow
+    Write-Host "         (Or open PC Matic > SuperShield, find $ExeName in the recently blocked" -ForegroundColor Yellow
+    Write-Host "          list, and whitelist it there - it will be listed by name now.)" -ForegroundColor Yellow
+    Write-Host "      It's fine if nothing visible happens: the tray icon has no window." -ForegroundColor Yellow
+    Write-Host ""
+
+    try {
+        Start-Process explorer.exe -ArgumentList "/select,`"$Path`""
+    } catch {
+        Write-Warn "Couldn't open Explorer automatically. Open this folder and double-click $ExeName:"
+        Write-Warn "  $Path"
+    }
+    [void](Read-Host "    Once you've allowed $ExeName, press Enter to continue")
+}
+
 try {
 
 # ─────────────────────────────────────────────
@@ -304,19 +356,21 @@ $started = Start-TrayAndWait
 while (-not $started) {
     Write-Warn "The task was triggered but $ExeName did not stay running for 10s."
     Write-TaskDiagnostics
-    Write-Host ""
-    Write-Host "    If your antivirus just prompted about $ExeName, choose its 'always allow' option." -ForegroundColor Yellow
-    Write-Host "    If nothing prompted, it is most likely blocking silently (a freshly built exe is" -ForegroundColor Yellow
-    Write-Host "    unknown to allow-list products); switch it to prompt mode and allow $ExePath" -ForegroundColor Yellow
-    Write-Host "    (PC Matic: SuperShield > Blocking Notification Method > 'Prompt for Override'," -ForegroundColor Yellow
-    Write-Host "    then retry here and click 'Always Allow')." -ForegroundColor Yellow
-    Write-Host ""
-    $answer = Read-Host "    Press Enter to try again, or type S to skip for now"
-    if ($answer -match '^[sS]') {
-        Write-Warn "Skipped. The task stays registered; run this script again once the launch is allowed."
-        break
-    }
+
+    # A task/script-launched start is exactly what an allow-list AV refuses, so
+    # walk the user through starting it once by hand (Explorer double-click) to
+    # get it allowed. Once the file is whitelisted, the task launch below works
+    # too, because the allow is on the exe, not on whatever launches it.
+    Invoke-WhitelistAssist -Path $ExePath
+
     $started = Start-TrayAndWait
+    if (-not $started) {
+        $answer = Read-Host "    $ExeName still isn't running. Press Enter to try again, or type S to skip"
+        if ($answer -match '^[sS]') {
+            Write-Warn "Skipped. The task stays registered; run this script again once the launch is allowed."
+            break
+        }
+    }
 }
 if ($started) {
     Write-Success "Running now, and will start automatically at logon."
