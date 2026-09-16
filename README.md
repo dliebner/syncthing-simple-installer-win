@@ -43,7 +43,9 @@ It starts automatically at logon through a scheduled task, `Syncthing Monitor (<
 
 There is deliberately no Exit item. If you need to stop it, hold **Shift** while right-clicking the icon to reveal a hidden **Exit** entry.
 
-Why a scheduled task rather than a Startup-folder shortcut: allow-list antivirus products such as PC Matic block shortcuts that launch a script interpreter (`wscript.exe`, `powershell.exe`), which would silently stop the tray from starting at logon. Task Scheduler starting PowerShell is the same path Syncthing itself uses. If your antivirus still objects, the one thing to allow is `powershell.exe` running `SyncthingTray.ps1` from the Syncthing install folder. On some machines a console window may flash for a fraction of a second when the task starts; that's PowerShell, not an error.
+Why a scheduled task rather than a Startup-folder shortcut: some antivirus products block shortcuts that launch a script interpreter (`wscript.exe`, `powershell.exe`), which would silently stop the tray from starting at logon. Task Scheduler starting PowerShell is the same path Syncthing itself uses. On some machines a console window may flash for a fraction of a second when the task starts; that's PowerShell, not an error.
+
+**Allow-list antivirus (PC Matic and similar):** these block `powershell.exe` whenever it isn't started from an interactive window, including by Task Scheduler, so the tray will not start until you allow it once. The installer tells you when this happens (task result "Access is denied"). For PC Matic: open SuperShield Protection, set *Blocking Notification Method* to *Prompt for Override (Advanced)*, double-click the **Syncthing Monitor** desktop shortcut, click **Always Allow** on the block screen, then run `tray\Install-SyncthingTray.ps1` again. Syncthing itself is unaffected.
 
 ### Managing the tray icon on its own
 

@@ -295,6 +295,7 @@ if (Get-TrayProcess) {
         $code = "0x{0:X}" -f $info.LastTaskResult
         $hint = switch ($info.LastTaskResult) {
             0          { "the process started and exited immediately (typical of antivirus blocking it, or the script failing at startup)" }
+            0x80070005 { "'Access is denied': Task Scheduler was refused when launching powershell.exe, which is what allow-list antivirus (e.g. PC Matic SuperShield) looks like" }
             0x41301    { "Task Scheduler says it is still running, so the tray process may simply not have been found by name" }
             0x41303    { "the task has never run; Task Scheduler didn't launch it at all" }
             0x800710E0 { "'the operator or administrator has refused the request' (task conditions/policy stopped it)" }
