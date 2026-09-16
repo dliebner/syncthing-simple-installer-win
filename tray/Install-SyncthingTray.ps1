@@ -361,8 +361,9 @@ if ($started) {
 # STEP 5: SHORTCUT ICON
 # ─────────────────────────────────────────────
 
-# The exe draws its own "running" icon (folder + green badge) as a multi-size
-# .ico, so the shortcuts look exactly like the tray. This runs after the first
+# The exe draws the shortcut icon (folder + badge, half green / half red so it
+# isn't mistaken for the live tray indicator) as a multi-size .ico, with the
+# same code that draws the tray icon. This runs after the first
 # launch above on purpose: by now any antivirus allow has been given. Written to
 # a temp file first so a failure can't clobber a good icon from a previous run.
 Write-Step "Generating shortcut icon..."

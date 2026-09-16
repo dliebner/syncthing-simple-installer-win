@@ -15,9 +15,9 @@
 //
 // Usage:
 //   SyncthingMonitor.exe                      run the tray icon (normal use)
-//   SyncthingMonitor.exe --export-icon <path> write the "running" icon as a
-//                                             multi-size .ico and exit (used by
-//                                             the installer for the shortcuts)
+//   SyncthingMonitor.exe --export-icon <path> write the shortcut icon (badge half
+//                                             green, half red) as a multi-size .ico
+//                                             and exit (used by the installer)
 //
 // Written for the C# 5 compiler in the .NET Framework, so it stays deliberately
 // old-fashioned: no string interpolation, no ?. operator, no expression bodies.
@@ -93,7 +93,10 @@ namespace SyncthingMonitor
         [STAThread]
         static int Main(string[] args)
         {
-            // --- Export mode: write the "running" icon and leave ---
+            // --- Export mode: write the shortcut icon and leave ---
+            // The shortcut badge is half green / half red on purpose: a solid green
+            // one on the desktop would read as "Syncthing is running" to someone who
+            // only knows the tray icon. Half-and-half says "this shows green or red".
             if (args.Length == 2 && args[0] == "--export-icon")
             {
                 try
@@ -101,7 +104,7 @@ namespace SyncthingMonitor
                     int[] sizes = { 16, 32, 48, 256 };
                     Bitmap[] bitmaps = new Bitmap[sizes.Length];
                     for (int i = 0; i < sizes.Length; i++)
-                        bitmaps[i] = IconFactory.NewStatusBitmap(sizes[i], Config.ColorUp);
+                        bitmaps[i] = IconFactory.NewStatusBitmap(sizes[i], Config.ColorUp, Config.ColorDown);
                     IconFactory.WriteIco(args[1], bitmaps);
                     foreach (Bitmap b in bitmaps) b.Dispose();
                     return 0;
@@ -476,7 +479,8 @@ namespace SyncthingMonitor
 
     // ============================== ICON DRAWING ==================================
     // Shared by the tray icon and by --export-icon, so the shortcut icon the installer
-    // creates is drawn by exactly the same code as what sits in the tray.
+    // creates is drawn by exactly the same code as what sits in the tray (only the
+    // badge colouring differs).
     static class IconFactory
     {
         // The stock Windows folder icon as a bitmap of the requested size.
@@ -524,6 +528,13 @@ namespace SyncthingMonitor
         // Badge geometry is proportional to the 32px original (14px dot, 2px halo, 2px inset).
         public static Bitmap NewStatusBitmap(int size, Color dot)
         {
+            return NewStatusBitmap(size, dot, dot);
+        }
+
+        // Same, with the dot split down the middle: left half in one color, right
+        // half in the other. Used for the shortcut icon.
+        public static Bitmap NewStatusBitmap(int size, Color dotLeft, Color dotRight)
+        {
             Bitmap bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb);
             using (Graphics g = Graphics.FromImage(bmp))
             {
@@ -555,10 +566,19 @@ namespace SyncthingMonitor
                 int cx     = size - bd / 2 - inset;
                 int cy     = bd / 2 + inset;
                 using (Brush white = new SolidBrush(Color.White))
-                using (Brush brush = new SolidBrush(dot))
+                using (Brush left  = new SolidBrush(dotLeft))
+                using (Brush right = new SolidBrush(dotRight))
                 {
                     g.FillEllipse(white, cx - outerD / 2, cy - outerD / 2, outerD, outerD);
-                    g.FillEllipse(brush, cx - bd / 2, cy - bd / 2, bd, bd);
+                    g.FillEllipse(left, cx - bd / 2, cy - bd / 2, bd, bd);
+                    if (dotRight != dotLeft)
+                    {
+                        // Paint the right half over the top, clipped to a rectangle: no
+                        // anti-aliased seam, unlike two half-pies meeting in the middle.
+                        g.SetClip(new Rectangle(cx, cy - outerD / 2, outerD, outerD));
+                        g.FillEllipse(right, cx - bd / 2, cy - bd / 2, bd, bd);
+                        g.ResetClip();
+                    }
                 }
             }
             return bmp;
