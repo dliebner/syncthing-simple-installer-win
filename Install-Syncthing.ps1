@@ -9,6 +9,7 @@
     - Creates a Task Scheduler task to start Syncthing at user logon
     - Adds a Windows Firewall rule for Syncthing
     - Starts Syncthing immediately after installation
+    - Installs the "Syncthing Monitor" tray icon (see tray\ and -NoTray)
 
 .NOTES
     Run this script as the user who will be running Syncthing.
@@ -24,12 +25,18 @@
 .PARAMETER StartupDelay
     Seconds to delay Syncthing startup after logon, to avoid startup congestion.
     Defaults to 30 seconds.
+
+.PARAMETER NoTray
+    Skip installing the "Syncthing Monitor" tray icon (tray\Install-SyncthingTray.ps1).
+    The tray icon is also skipped, with a warning, if the tray\ folder isn't next
+    to this script.
 #>
 
 param(
     [string]$InstallDir = "$env:LOCALAPPDATA\Programs\Syncthing",
     [int]$GuiPort = 8384,
-    [int]$StartupDelay = 30
+    [int]$StartupDelay = 30,
+    [switch]$NoTray
 )
 
 Set-StrictMode -Version Latest
@@ -45,6 +52,7 @@ $TaskNameStart    = "Syncthing - Start at Logon ($env:USERNAME)"
 $FirewallRuleName = "Syncthing ($env:USERNAME)"
 $SyncthingExe     = Join-Path $InstallDir "syncthing.exe"
 $ConfigPath       = Join-Path $env:LOCALAPPDATA "Syncthing\config.xml"
+$TrayInstaller    = Join-Path $PSScriptRoot "tray\Install-SyncthingTray.ps1"
 
 # ─────────────────────────────────────────────
 # HELPERS
@@ -369,6 +377,29 @@ $safeRuleName = $FirewallRuleName -replace "'", "''"
 $fwRemoveCommand = "Remove-NetFirewallRule -DisplayName '$safeRuleName' -ErrorAction SilentlyContinue"
 $fwRemoveEncoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($fwRemoveCommand))
 
+# Tray cleanup (always included: the tray can also be added later by hand).
+# Single-quoted on purpose: this runs verbatim inside the uninstaller.
+$UninstallTrayBlock = @'
+Write-Host "Stopping Syncthing Monitor (tray icon)..." -ForegroundColor Cyan
+try {
+    $trayExit = [System.Threading.EventWaitHandle]::OpenExisting("SyncthingTrayMonitor_Exit_$env:USERNAME")
+    [void]$trayExit.Set()
+    $trayExit.Dispose()
+    Start-Sleep -Seconds 2
+} catch {}
+Get-Process -Name "SyncthingMonitor" | Stop-Process -Force
+# Older versions ran the tray as a PowerShell script.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+    Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*\SyncthingTray.ps1*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+Unregister-ScheduledTask -TaskName "Syncthing Monitor ($env:USERNAME)" -Confirm:$false
+
+Write-Host "Removing Syncthing Monitor shortcuts..." -ForegroundColor Cyan
+foreach ($dir in @([Environment]::GetFolderPath('Startup'), [Environment]::GetFolderPath('Programs'), [Environment]::GetFolderPath('Desktop'))) {
+    Remove-Item (Join-Path $dir "Syncthing Monitor.lnk") -Force
+}
+'@
+
 # 1. Create Uninstall-Syncthing.ps1
 $UninstallScriptPath = Join-Path $InstallDir "Uninstall-Syncthing.ps1"
 
@@ -386,6 +417,8 @@ Unregister-ScheduledTask -TaskName "$TaskNameStart" -Confirm:`$false
 Write-Host "Removing Firewall Rule ('$FirewallRuleName')..." -ForegroundColor Cyan
 Write-Host "(Prompting for Admin privileges...)" -ForegroundColor Yellow
 Start-Process powershell -Verb RunAs -ArgumentList "-NoProfile -WindowStyle Hidden -EncodedCommand $fwRemoveEncoded" -Wait
+
+$UninstallTrayBlock
 
 Write-Host ""
 Write-Host "─────────────────────────────────────────────" -ForegroundColor Green
@@ -415,7 +448,10 @@ MANUAL METHOD:
 1. Stop Syncthing if it is running (via Task Manager or Web UI).
 2. Open Task Scheduler and delete the task: '$TaskNameStart'
 3. Open Windows Defender Firewall and delete the inbound rule: '$FirewallRuleName'
-4. Delete this program folder: $InstallDir
+4. If the Syncthing Monitor tray icon is installed: hold Shift, right-click it and choose Exit,
+   delete the task 'Syncthing Monitor ($env:USERNAME)' in Task Scheduler, and delete
+   'Syncthing Monitor.lnk' from the Start menu and the desktop.
+5. Delete this program folder: $InstallDir
 
 OPTIONAL (To clear all your synced folder configurations and database):
 Delete: $env:LOCALAPPDATA\Syncthing
@@ -426,12 +462,43 @@ Write-Success "Created uninstall.txt"
 
 
 # ─────────────────────────────────────────────
-# DONE
+# STEP 8: START SYNCTHING
 # ─────────────────────────────────────────────
 
 Write-Step "Starting Syncthing..."
 Start-ScheduledTask -TaskName $TaskNameStart
 Write-Success "Syncthing is now running in the background."
+
+# ─────────────────────────────────────────────
+# STEP 9: TRAY ICON (optional)
+# ─────────────────────────────────────────────
+
+# The tray installer copies tray\* into $InstallDir, compiles the tray icon
+# there (SyncthingMonitor.exe, using the compiler that ships with Windows),
+# registers a logon task, adds "Syncthing Monitor" shortcuts (Start menu,
+# desktop) and starts it.
+# A failure here is reported but doesn't undo the Syncthing install above.
+$trayStatus = "not installed (-NoTray)"
+if (-not $NoTray) {
+    Write-Step "Installing Syncthing Monitor tray icon..."
+    if (Test-Path $TrayInstaller) {
+        try {
+            & $TrayInstaller -InstallDir $InstallDir -NoPause
+            $trayStatus = "installed (logon task 'Syncthing Monitor ($env:USERNAME)', Start menu and desktop shortcuts)"
+        } catch {
+            Write-Warn "Tray icon install failed: $($_.Exception.Message)"
+            $trayStatus = "FAILED - run tray\Install-SyncthingTray.ps1 by hand"
+        }
+    } else {
+        Write-Warn "tray\Install-SyncthingTray.ps1 not found next to this script; skipping."
+        Write-Warn "Download the whole repo (not just this script) to get the tray icon."
+        $trayStatus = "skipped (tray\ folder not found)"
+    }
+}
+
+# ─────────────────────────────────────────────
+# DONE
+# ─────────────────────────────────────────────
 
 Write-Host ""
 Write-Host "─────────────────────────────────────────────" -ForegroundColor Cyan
@@ -441,6 +508,7 @@ Write-Host ""
 Write-Host "  Installed to : $SyncthingExe"
 Write-Host "  Web UI       : http://localhost:$GuiPort"
 Write-Host "  Start task   : $TaskNameStart (delay: ${StartupDelay}s after logon)"
+Write-Host "  Tray icon    : $trayStatus"
 Write-Host ""
 Write-Host "  Next steps:"
 Write-Host "  1. Open http://localhost:$GuiPort to configure Syncthing"
