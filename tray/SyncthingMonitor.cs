@@ -287,6 +287,10 @@ namespace SyncthingMonitor
             try
             {
                 HttpWebRequest req = NewRequest(url + "/rest/noauth/health", 3000);
+                // A redirect here means we're on the wrong scheme (http to a TLS GUI).
+                // Don't follow it, so this counts as a miss and the other scheme in
+                // the fallback list gets promoted, or POSTs would fail later.
+                req.AllowAutoRedirect = false;
                 using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
                 using (StreamReader sr = new StreamReader(resp.GetResponseStream()))
                 {
@@ -335,32 +339,75 @@ namespace SyncthingMonitor
 
         void DoSyncNow()
         {
-            bool ok = false;
-            try
-            {
-                HttpWebRequest req = NewRequest(baseUrl + "/rest/db/scan", 10000);
-                req.Method = "POST";
-                req.ContentLength = 0;
-                req.Headers["X-API-Key"] = apiKey;
-                // GetResponse throws on HTTP errors (e.g. 403 from a bad API key), so an
-                // auth failure isn't reported as a successful sync.
-                using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
-                {
-                    ok = (int)resp.StatusCode >= 200 && (int)resp.StatusCode < 300;
-                }
-            }
-            catch { ok = false; }
-
-            if (ok)
+            string why = TrySyncNow();
+            if (why == null)
             {
                 ShowToast(2000, "Syncthing", "Sync started.", ToolTipIcon.Info);
             }
             else
             {
-                string why = (apiKey.Length == 0) ? "no API key was found." : "Syncthing may have stopped.";
-                ShowToast(3000, "Syncthing", "Couldn't trigger a sync: " + why, ToolTipIcon.Warning);
+                ShowToast(5000, "Syncthing", "Couldn't trigger a sync: " + why, ToolTipIcon.Warning);
                 StartFastPoll();   // confirm red quickly if it really has gone down
             }
+        }
+
+        // POST /rest/db/scan. Returns null on success, otherwise a one-line reason
+        // that says what actually happened (rather than guessing "it stopped").
+        string TrySyncNow()
+        {
+            for (int attempt = 0; attempt < 3; attempt++)
+            {
+                if (apiKey.Length == 0)
+                {
+                    ReadConfig();   // config.xml may have been (re)written since we started
+                    if (apiKey.Length == 0) return "no API key was found in config.xml.";
+                }
+                try
+                {
+                    HttpWebRequest req = NewRequest(baseUrl + "/rest/db/scan", 10000);
+                    req.Method = "POST";
+                    req.ContentLength = 0;
+                    req.Headers["X-API-Key"] = apiKey;
+                    // A followed redirect turns the POST into a GET, which this
+                    // endpoint refuses; a redirect means wrong scheme, so flip and retry.
+                    req.AllowAutoRedirect = false;
+                    using (HttpWebResponse resp = (HttpWebResponse)req.GetResponse())
+                    {
+                        int code = (int)resp.StatusCode;
+                        if (code >= 200 && code < 300) return null;
+                        if (code >= 300 && code < 400 && SwitchScheme()) continue;
+                        return "Syncthing answered HTTP " + code + ".";
+                    }
+                }
+                catch (WebException ex)
+                {
+                    HttpWebResponse r = ex.Response as HttpWebResponse;
+                    if (r == null) return ex.Message;
+                    int code = (int)r.StatusCode;
+                    r.Close();
+                    if (code == 401 || code == 403)
+                    {
+                        // Stale key? Re-read config.xml once and try again.
+                        string before = apiKey;
+                        ReadConfig();
+                        if (apiKey != before && apiKey.Length > 0) continue;
+                        return "Syncthing rejected the API key (HTTP " + code + "). The tray reads it from "
+                             + Path.Combine(Config.SyncthingHome, "config.xml") + "; is that the config of the Syncthing that's running?";
+                    }
+                    return "Syncthing answered HTTP " + code + ".";
+                }
+                catch (Exception ex) { return ex.Message; }
+            }
+            return "gave up after retrying.";
+        }
+
+        // http <-> https on baseUrl. True if it changed.
+        bool SwitchScheme()
+        {
+            if (baseUrl.StartsWith("https://"))     baseUrl = "http://"  + baseUrl.Substring(8);
+            else if (baseUrl.StartsWith("http://")) baseUrl = "https://" + baseUrl.Substring(7);
+            else return false;
+            return true;
         }
 
         // Balloon tips are toasts on Windows 10/11, and the picture on a toast is the
