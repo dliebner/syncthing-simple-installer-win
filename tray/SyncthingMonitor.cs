@@ -145,6 +145,7 @@ namespace SyncthingMonitor
         System.Windows.Forms.Timer controlTimer;
         EventWaitHandle exitEvent;
         Icon iconUp, iconDown;
+        Icon registeredIcon;   // the icon the shell has on file for our tray entry (see ShowToast)
 
         // State
         bool?    lastUp      = null;                 // last confirmed up/down
@@ -185,10 +186,14 @@ namespace SyncthingMonitor
             if (Config.EnableShiftExit) menu.Opening += OnMenuOpening;
 
             notify = new NotifyIcon();
-            notify.Icon = iconDown;
+            // Register with the real state rather than a placeholder: the shell keeps
+            // the icon it sees here for toasts (see ShowToast), and this also avoids
+            // a red flash at startup.
+            notify.Icon = TestUp() ? iconUp : iconDown;
             notify.Text = "Syncthing: checking...";
             notify.ContextMenuStrip = menu;
             notify.Visible = true;
+            registeredIcon = notify.Icon;
 
             timer = new System.Windows.Forms.Timer();
             timer.Interval = normalInterval;
@@ -206,7 +211,7 @@ namespace SyncthingMonitor
 
             // Surface any config problems found at startup, once.
             if (warnings.Length > 0)
-                notify.ShowBalloonTip(8000, "Syncthing Monitor: check setup", warnings.Trim(), ToolTipIcon.Warning);
+                ShowToast(8000, "Syncthing Monitor: check setup", warnings.Trim(), ToolTipIcon.Warning);
         }
 
         // --- Read address, scheme, and API key from config.xml (best-effort) ---
@@ -319,7 +324,7 @@ namespace SyncthingMonitor
         {
             if (RunHidden("schtasks.exe", "/Run /TN \"" + Config.TaskName + "\"") != 0)
             {
-                notify.ShowBalloonTip(4000, "Syncthing",
+                ShowToast(4000, "Syncthing",
                     "Couldn't start Syncthing: the scheduled task '" + Config.TaskName + "' wasn't found or couldn't run.",
                     ToolTipIcon.Warning);
                 return;
@@ -348,14 +353,29 @@ namespace SyncthingMonitor
 
             if (ok)
             {
-                notify.ShowBalloonTip(2000, "Syncthing", "Sync started.", ToolTipIcon.Info);
+                ShowToast(2000, "Syncthing", "Sync started.", ToolTipIcon.Info);
             }
             else
             {
                 string why = (apiKey.Length == 0) ? "no API key was found." : "Syncthing may have stopped.";
-                notify.ShowBalloonTip(3000, "Syncthing", "Couldn't trigger a sync: " + why, ToolTipIcon.Warning);
+                ShowToast(3000, "Syncthing", "Couldn't trigger a sync: " + why, ToolTipIcon.Warning);
                 StartFastPoll();   // confirm red quickly if it really has gone down
             }
+        }
+
+        // Balloon tips are toasts on Windows 10/11, and the picture on a toast is the
+        // icon the shell had when the tray entry was *registered*, not the current
+        // one: after a status change, toasts would keep showing the old badge. If the
+        // badge has changed since registration, re-register first so they match.
+        void ShowToast(int timeoutMs, string title, string text, ToolTipIcon kind)
+        {
+            if (notify.Icon != registeredIcon)
+            {
+                notify.Visible = false;
+                notify.Visible = true;
+                registeredIcon = notify.Icon;
+            }
+            notify.ShowBalloonTip(timeoutMs, title, text, kind);
         }
 
         void SetMenu(bool up)
@@ -407,7 +427,7 @@ namespace SyncthingMonitor
             {
                 if ((DateTime.Now - lastBalloon).TotalSeconds >= 120)
                 {
-                    notify.ShowBalloonTip(5000, "Syncthing stopped",
+                    ShowToast(5000, "Syncthing stopped",
                         "File sync is not running. Right-click the tray icon and choose 'Start Syncthing'.",
                         ToolTipIcon.Warning);
                     lastBalloon = DateTime.Now;
